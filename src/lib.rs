@@ -14,4 +14,5 @@ pub mod chunk;
 pub mod nbt;
 pub mod noise;
 pub mod rng;
+pub mod sky;
 pub mod worldgen;

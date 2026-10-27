@@ -11,14 +11,37 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
     pub pos: [f32; 3],
-    /// Light/shade/tint multiplier (and, without a texture, the block colour). May exceed 1.0 for emissive blocks.
+    /// Face shade, biome tint and ambient occlusion (and, without a texture, the block colour).
+    /// May exceed 1.0 for emissive blocks.
     pub color: [f32; 3],
     /// Atlas UV. Untextured geometry points at the atlas's white texel.
     pub uv: [f32; 2],
+    /// (sky, block) light, 0..1. The shader scales sky light by the time of day.
+    pub light: [f32; 2],
+    /// Surface opacity for the translucent pass (1.0 for everything else).
+    pub alpha: f32,
 }
 
 #[derive(Default)]
-pub struct Mesh { pub vertices: Vec<Vertex>, pub indices: Vec<u32> }
+pub struct Mesh {
+    pub vertices: Vec<Vertex>,
+    /// Opaque and cutout triangles.
+    pub indices: Vec<u32>,
+    /// Translucent triangles (water, ice, stained glass) sharing `vertices`; draw after the opaque pass.
+    pub translucent: Vec<u32>,
+}
+
+/// Opacity of blocks drawn in the translucent pass.
+pub fn translucency(name: &str) -> Option<f32> {
+    match name.strip_prefix("minecraft:").unwrap_or(name) {
+        "water" => Some(0.7),
+        "ice" | "frosted_ice" => Some(0.8),
+        "slime_block" | "honey_block" => Some(0.8),
+        "tinted_glass" => Some(0.85),
+        n if n.ends_with("stained_glass") || n.ends_with("stained_glass_pane") => Some(0.75),
+        _ => None,
+    }
+}
 
 pub fn block_color(name: &str) -> [f32; 3] {
     let c: [i32; 3] = match name {
@@ -68,9 +91,28 @@ pub fn mesh_chunk(c: &Chunk, nb: [Option<&Chunk>; 4]) -> Mesh { mesh_chunk_with(
 /// Per-state facts cached during one meshing call.
 struct Info { variants: Option<Arc<Vec<Arc<Baked>>>>, opaque_full: bool }
 
+#[derive(Clone, Copy)]
+struct Cell<'a> { block: &'a BlockState, sky: u8, blk: u8 }
+
+/// Face axis and the two tangent axes, indexed like `DIRS` (down, up, north, south, west, east).
+const FACE_AXES: [(usize, usize, usize); 6] = [(1, 0, 2), (1, 0, 2), (2, 0, 1), (2, 0, 1), (0, 1, 2), (0, 1, 2)];
+/// Vanilla-style per-face shading, indexed like `DIRS`.
+const SHADE: [f32; 6] = [0.5, 1.0, 0.8, 0.8, 0.6, 0.6];
+/// `FACES` (+x, -x, +y, -y, +z, -z) -> `DIRS` index.
+const FACES_TO_DIR: [usize; 6] = [5, 4, 1, 0, 3, 2];
+const AO: [f32; 4] = [1.0, 0.82, 0.64, 0.46];
+
 /// `models`: when present, blocks with a model in the resource pack are drawn textured; everything else falls back to
-/// coloured cubes. Plants are only drawn when a model exists for them.
+/// coloured cubes. Plants are only drawn when a model exists for them. Only the four edge neighbours are known here, so
+/// light and occlusion at chunk corners fall back to the centre cell; use `mesh_chunk_grid` with all eight for exactness.
 pub fn mesh_chunk_with(c: &Chunk, nb: [Option<&Chunk>; 4], models: Option<&Models>) -> Mesh {
+    let grid = [[None, nb[2], None], [nb[0], Some(c), nb[1]], [None, nb[3], None]];
+    mesh_chunk_grid(grid, models, true)
+}
+
+/// `grid[dx + 1][dz + 1]` is the chunk at offset (dx, dz) from the centre chunk `grid[1][1]`.
+pub fn mesh_chunk_grid(grid: [[Option<&Chunk>; 3]; 3], models: Option<&Models>, smooth: bool) -> Mesh {
+    let c = grid[1][1].expect("centre chunk");
     let mut m = Mesh::default();
     let top = MIN_Y + (c.sections.len() * 16) as i32;
     let white = models.map_or([0.0, 0.0], |m| m.atlas.white_uv());
@@ -89,21 +131,47 @@ pub fn mesh_chunk_with(c: &Chunk, nb: [Option<&Chunk>; 4], models: Option<&Model
         infos.borrow_mut().insert(key, i.clone());
         i
     };
-    // Returns (block, light) at chunk-local coords possibly outside the chunk horizontally.
-    let probe = |x: i32, y: i32, z: i32| -> Option<(&BlockState, u8)> {
+    // Block + light at chunk-local coordinates, possibly in a neighbouring chunk (including diagonals).
+    let cell = |x: i32, y: i32, z: i32| -> Option<Cell> {
         if y < MIN_Y || y >= top { return None; }
-        let (ch, lx, lz) = if x < 0 { (nb[0], x + 16, z) } else if x > 15 { (nb[1], x - 16, z) }
-            else if z < 0 { (nb[2], x, z + 16) } else if z > 15 { (nb[3], x, z - 16) } else { (Some(c), x, z) };
-        let ch = ch?;
+        let ((dx, lx), (dz, lz)) = ((if x < 0 { (0, x + 16) } else if x > 15 { (2, x - 16) } else { (1, x) }),
+                                    (if z < 0 { (0, z + 16) } else if z > 15 { (2, z - 16) } else { (1, z) }));
+        let ch = grid[dx][dz]?;
         let (lx, lz) = (lx as usize, lz as usize);
-        Some((ch.get(lx, y, lz), ch.sky_light(lx, y, lz).max(ch.block_light(lx, y, lz))))
+        Some(Cell { block: ch.get(lx, y, lz), sky: ch.sky_light(lx, y, lz), blk: ch.block_light(lx, y, lz) })
     };
-    let push = |m: &mut Mesh, quad: [([f32; 3], [f32; 2]); 4], color: [f32; 3]| {
+
+    // Smooth lighting and ambient occlusion for one face vertex. `base` is the cell in front of the face;
+    // `v` is the vertex in block-local space. Returns ((sky, block) 0..1, occlusion multiplier).
+    let vertex_light = |base: [i32; 3], face: usize, v: [f32; 3], own: (u8, u8)| -> ([f32; 2], f32) {
+        let (_, t1, t2) = FACE_AXES[face];
+        let (s1, s2) = (if v[t1] >= 0.5 { 1 } else { -1 }, if v[t2] >= 0.5 { 1 } else { -1 });
+        let off = |a: i32, b: i32| { let mut p = base; p[t1] += a * s1; p[t2] += b * s2; p };
+        let sample = |p: [i32; 3]| -> (bool, u8, u8) {
+            match cell(p[0], p[1], p[2]) { Some(c) => (info(c.block).opaque_full, c.sky, c.blk), None => (false, 15, 0) }
+        };
+        let centre = sample(base);
+        // An opaque cell in front of the face (partial blocks) contributes the block's own light instead.
+        let (csky, cblk) = if centre.0 { own } else { (centre.1, centre.2) };
+        let (a, b, d) = (sample(off(1, 0)), sample(off(0, 1)), sample(off(1, 1)));
+        let corner_blocked = a.0 && b.0;
+        let pick = |s: (bool, u8, u8), fallback: bool| if s.0 || fallback { (csky, cblk) } else { (s.1, s.2) };
+        let (pa, pb, pd) = (pick(a, false), pick(b, false), pick(d, corner_blocked));
+        let sky = (csky as f32 + pa.0 as f32 + pb.0 as f32 + pd.0 as f32) / 60.0;
+        let blk = (cblk as f32 + pa.1 as f32 + pb.1 as f32 + pd.1 as f32) / 60.0;
+        let occluders = if corner_blocked { 3 } else { a.0 as usize + b.0 as usize + d.0 as usize };
+        ([sky, blk], AO[occluders])
+    };
+
+    let emit = |m: &mut Mesh, translucent: bool, quad: [([f32; 3], [f32; 2], [f32; 2], f32); 4], color: [f32; 3], alpha: f32| {
         let base = m.vertices.len() as u32;
-        for (pos, uv) in quad { m.vertices.push(Vertex { pos, color, uv }); }
-        // Quads are listed clockwise as seen from outside; wind them counter-clockwise for back-face culling.
-        m.indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+        for (pos, uv, light, ao) in quad { m.vertices.push(Vertex { pos, color: [color[0] * ao, color[1] * ao, color[2] * ao], uv, light, alpha }); }
+        // Quads are listed clockwise as seen from outside. Pick the diagonal that follows the occlusion gradient.
+        let flip = quad[0].3 + quad[2].3 < quad[1].3 + quad[3].3;
+        let tris = if flip { [base + 1, base + 3, base + 2, base + 3, base + 1, base] } else { [base, base + 2, base + 1, base, base + 3, base + 2] };
+        if translucent { m.translucent.extend(tris); } else { m.indices.extend(tris); }
     };
+
     for (si, s) in c.sections.iter().enumerate() {
         if s.palette.len() == 1 && s.palette[0].is_air() { continue; }
         for ly in 0..16usize { for z in 0..16usize { for x in 0..16usize {
@@ -113,8 +181,10 @@ pub fn mesh_chunk_with(c: &Chunk, nb: [Option<&Chunk>; 4], models: Option<&Model
             let is_fluid = matches!(b.name.as_str(), "minecraft:water" | "minecraft:lava");
             // Emissive blocks ignore ambient light and exceed 1.0 so HDR outputs can show them brighter than white.
             let glow = emission(&b.name) as f32 / 15.0 * 3.0;
-            let own_light = s.sky[ly * 256 + z * 16 + x].max(s.block_light[ly * 256 + z * 16 + x]);
+            let own = (s.sky[ly * 256 + z * 16 + x], s.block_light[ly * 256 + z * 16 + x]);
             let (bx, bz) = (x as i32, z as i32);
+            let trans = translucency(&b.name);
+            let alpha = trans.unwrap_or(1.0);
             let me = info(b);
             // Faces are hidden by opaque full cubes, and between identical translucent blocks (glass, leaves, water).
             let own_full = me.variants.as_ref().map_or(!b.is_plant(), |v| v[0].full_cube);
@@ -130,15 +200,25 @@ pub fn mesh_chunk_with(c: &Chunk, nb: [Option<&Chunk>; 4], models: Option<&Model
                     let tint = if biome.is_empty() { [1.0; 3] } else { models.unwrap().tint(&b.name, biome) };
                     for q in &model.quads {
                         let dir = DIRS[q.face];
-                        let neighbour = probe(bx + dir[0], y + dir[1], bz + dir[2]);
                         if let Some(cd) = q.cull {
                             let d = DIRS[cd];
-                            if let Some((nbk, _)) = probe(bx + d[0], y + d[1], bz + d[2]) { if hidden_by(nbk) { continue; } }
+                            if let Some(n) = cell(bx + d[0], y + d[1], bz + d[2]) { if hidden_by(n.block) { continue; } }
                         }
-                        let light = neighbour.map_or(15, |(_, l)| l).max(own_light);
-                        let f = if glow > 0.0 { glow * (0.85 + 0.15 * q.shade) } else { q.shade * (0.15 + 0.85 * light as f32 / 15.0) };
-                        let col = if q.tint >= 0 { [tint[0] * f, tint[1] * f, tint[2] * f] } else { [f, f, f] };
-                        push(&mut m, std::array::from_fn(|i| ([bx as f32 + q.verts[i][0], y as f32 + q.verts[i][1], bz as f32 + q.verts[i][2]], q.uv[i])), col);
+                        let (axis, _, _) = FACE_AXES[q.face];
+                        let plane = if dir[axis] > 0 { 1.0 } else { 0.0 };
+                        let on_plane = q.verts.iter().all(|v| (v[axis] - plane).abs() < 0.001);
+                        let base = [bx + dir[0], y + dir[1], bz + dir[2]];
+                        let flat = cell(base[0], base[1], base[2]).map_or((15, 0), |n| (n.sky, n.blk));
+                        let flat = [flat.0.max(own.0) as f32 / 15.0, flat.1.max(own.1) as f32 / 15.0];
+                        let verts: [([f32; 3], [f32; 2], [f32; 2], f32); 4] = std::array::from_fn(|i| {
+                            let v = q.verts[i];
+                            let (light, ao) = if glow > 0.0 { ([1.0, 1.0], 1.0) }
+                                else if smooth && on_plane { vertex_light(base, q.face, v, own) } else { (flat, 1.0) };
+                            ([bx as f32 + v[0], y as f32 + v[1], bz as f32 + v[2]], q.uv[i], light, ao)
+                        });
+                        let shade = if glow > 0.0 { glow * (0.85 + 0.15 * q.shade) } else { q.shade };
+                        let col = if q.tint >= 0 { [tint[0] * shade, tint[1] * shade, tint[2] * shade] } else { [shade; 3] };
+                        emit(&mut m, trans.is_some(), verts, col, alpha);
                     }
                     continue;
                 }
@@ -148,36 +228,37 @@ pub fn mesh_chunk_with(c: &Chunk, nb: [Option<&Chunk>; 4], models: Option<&Model
             let col = block_color(&b.name);
             // Fluid surface height: source 8/9, flowing (8-L)/9, falling or covered columns full height.
             let fluid_h = if is_fluid {
-                let covered = probe(bx, y + 1, bz).is_some_and(|(a, _)| a.name == b.name);
+                let covered = cell(bx, y + 1, bz).is_some_and(|a| a.block.name == b.name);
                 Some(if covered { 1.0 } else { match b.fluid_level() { Some(0) | None => 8.0 / 9.0, Some(l) if l >= 8 => 1.0, Some(l) => (8 - l) as f32 / 9.0 } })
             } else { None };
             let tex = if is_fluid { models.map(|m| (m.fluid_texture(&b.name), m.tint(&b.name, c.biome_at(x, y, z)))) } else { None };
-            for (fi, (dir, shade, corners)) in FACES.iter().enumerate() {
-                let (nx, ny, nz) = (bx + dir[0], y + dir[1], bz + dir[2]);
-                let light = match probe(nx, ny, nz) {
-                    Some((nbk, l)) => { if hidden_by(nbk) { continue; } l }
-                    None => 15,
-                };
-                let f = if glow > 0.0 { glow * (0.85 + 0.15 * shade) } else { shade * (0.15 + 0.85 * light as f32 / 15.0) };
-                let quad: [([f32; 3], [f32; 2]); 4] = std::array::from_fn(|i| {
+            for (fi, (dir, _, corners)) in FACES.iter().enumerate() {
+                let face = FACES_TO_DIR[fi];
+                let n = cell(bx + dir[0], y + dir[1], bz + dir[2]);
+                if let Some(n) = &n { if hidden_by(n.block) { continue; } }
+                let flat = n.map_or([1.0, 0.0], |n| [n.sky as f32 / 15.0, n.blk as f32 / 15.0]);
+                let base = [bx + dir[0], y + dir[1], bz + dir[2]];
+                let quad: [([f32; 3], [f32; 2], [f32; 2], f32); 4] = std::array::from_fn(|i| {
                     let k = corners[3 - i]; // FACES lists corners CCW; quads here are CW
                     let ky = match fluid_h { Some(h) if k[1] == 1.0 => h, _ => k[1] };
                     let uv = match &tex {
                         // Project the texture onto the face: top/bottom use x,z; sides use the horizontal axis and height.
                         Some(((u0, v0, u1, v1), _)) => {
-                            let (a, bb) = match fi { 2 | 3 => (k[0], k[2]), 0 | 1 | 4 | 5 => (k[0], k[2]), _ => (k[0], k[2]) };
-                            let (a, bb) = if fi == 2 || fi == 3 { (k[0], k[1]) } else if fi == 4 || fi == 5 { (k[2], k[1]) } else { (a, bb) };
-                            [u0 + (u1 - u0) * a.clamp(0.0, 1.0) * 0.999, v0 + (v1 - v0) * (if fi >= 2 { 1.0 - bb } else { bb }).clamp(0.0, 1.0) * 0.999]
+                            let (a, bb) = if fi == 4 || fi == 5 { (k[0], k[1]) } else if fi == 0 || fi == 1 { (k[2], k[1]) } else { (k[0], k[2]) };
+                            [u0 + (u1 - u0) * a.clamp(0.0, 1.0) * 0.999, v0 + (v1 - v0) * (if fi < 2 || fi >= 4 { 1.0 - bb } else { bb }).clamp(0.0, 1.0) * 0.999]
                         }
                         None => white,
                     };
-                    ([bx as f32 + k[0], y as f32 + ky, bz as f32 + k[2]], uv)
+                    let (light, ao) = if glow > 0.0 { ([1.0, 1.0], 1.0) }
+                        else if smooth && !is_fluid { vertex_light(base, face, k, own) } else { (flat, 1.0) };
+                    ([bx as f32 + k[0], y as f32 + ky, bz as f32 + k[2]], uv, light, ao)
                 });
+                let shade = if glow > 0.0 { glow * (0.85 + 0.15 * SHADE[face]) } else { SHADE[face] };
                 let color = match (&tex, col) {
-                    (Some((_, tint)), _) => [tint[0] * f, tint[1] * f, tint[2] * f],
-                    (None, c) => [c[0] * f, c[1] * f, c[2] * f],
+                    (Some((_, tint)), _) => [tint[0] * shade, tint[1] * shade, tint[2] * shade],
+                    (None, c) => [c[0] * shade, c[1] * shade, c[2] * shade],
                 };
-                push(&mut m, quad, color);
+                emit(&mut m, trans.is_some(), quad, color, alpha);
             }
         }}}
     }
@@ -193,7 +274,7 @@ pub fn box_mesh(min: [f32; 3], max: [f32; 3], color: [f32; 3]) -> Mesh {
             m.vertices.push(Vertex {
                 pos: [min[0] + k[0] * (max[0] - min[0]), min[1] + k[1] * (max[1] - min[1]), min[2] + k[2] * (max[2] - min[2])],
                 color: [color[0] * shade, color[1] * shade, color[2] * shade],
-                uv: [0.0, 0.0],
+                uv: [0.0, 0.0], light: [1.0, 0.0], alpha: 1.0,
             });
         }
         m.indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -203,7 +284,7 @@ pub fn box_mesh(min: [f32; 3], max: [f32; 3], color: [f32; 3]) -> Mesh {
 
 fn append(dst: &mut Mesh, src: Mesh, f: impl Fn([f32; 3]) -> [f32; 3]) {
     let base = dst.vertices.len() as u32;
-    dst.vertices.extend(src.vertices.into_iter().map(|v| Vertex { pos: f(v.pos), color: v.color, uv: v.uv }));
+    dst.vertices.extend(src.vertices.into_iter().map(|v| Vertex { pos: f(v.pos), ..v }));
     dst.indices.extend(src.indices.into_iter().map(|i| i + base));
 }
 
@@ -387,5 +468,82 @@ mod tests {
         let side = mesh_chunk_with(&g, [None; 4], Some(&models)).vertices.iter().find(|v| v.pos[0] == 5.0 && v.pos[1] == 70.0 && v.pos[2] == 5.0).unwrap().color;
         assert!(side[0] == side[1] && side[1] == side[2], "untinted faces stay neutral grey: {side:?}");
         std::fs::remove_dir_all(d).ok();
+    }
+
+    // ---- lighting, occlusion, translucency ----
+    fn top_vertices(m: &Mesh, x: f32, y: f32, z: f32) -> Vec<Vertex> {
+        m.vertices.iter().filter(|v| v.pos[1] == y && v.pos[0] >= x && v.pos[0] <= x + 1.0 && v.pos[2] >= z && v.pos[2] <= z + 1.0).copied().collect()
+    }
+
+    #[test]
+    fn ambient_occlusion_darkens_corners_next_to_walls() {
+        let mut c = Chunk::empty(0, 0);
+        let stone = BlockState::simple("minecraft:stone");
+        c.set(5, 70, 5, &stone);
+        c.set(6, 71, 5, &stone); // a block resting beside the top face of (5,70,5)
+        for y in 0..384 / 16 { for s in 0..1 { let _ = (y, s); } }
+        let m = mesh_chunk(&c, [None; 4]);
+        // Top face of the lower block is at y=71. Its vertices touching x=6 meet the wall; those at x=5 are open.
+        let tops: Vec<Vertex> = m.vertices.iter().filter(|v| v.pos[1] == 71.0 && v.pos[0] <= 6.0 && v.pos[2] >= 5.0 && v.pos[2] <= 6.0 && v.pos[0] >= 5.0).copied().collect();
+        let open = tops.iter().filter(|v| v.pos[0] == 5.0).map(|v| v.color[0]).fold(f32::MAX, f32::min);
+        let walled = tops.iter().filter(|v| v.pos[0] == 6.0).map(|v| v.color[0]).fold(f32::MAX, f32::min);
+        assert!(walled < open, "vertices next to the wall are occluded: {walled} vs {open}");
+        // A flat open surface has no occlusion at all.
+        let mut f = Chunk::empty(0, 0);
+        for x in 3..9 { for z in 3..9 { f.set(x, 70, z, &stone); } }
+        let fm = mesh_chunk(&f, [None; 4]);
+        let mid: Vec<f32> = top_vertices(&fm, 5.0, 71.0, 5.0).iter().map(|v| v.color[0]).collect();
+        assert!(mid.iter().all(|&c| (c - mid[0]).abs() < 1e-6), "no AO on open ground");
+    }
+
+    #[test]
+    fn smooth_light_averages_across_neighbouring_cells() {
+        let mut c = Chunk::empty(0, 0);
+        c.set(5, 70, 5, &BlockState::simple("minecraft:stone"));
+        // Light only the cell above and +x of the block: vertices on that side average higher.
+        for (x, lvl) in [(5usize, 12u8), (6, 12)] { let ry = (71 - MIN_Y) as usize; c.sections[ry / 16].block_light[(ry % 16) * 256 + 5 * 16 + x] = lvl; }
+        let m = mesh_chunk(&c, [None; 4]);
+        let tops: Vec<Vertex> = m.vertices.iter().filter(|v| v.pos[1] == 71.0 && v.pos[0] >= 5.0 && v.pos[0] <= 6.0 && v.pos[2] >= 5.0 && v.pos[2] <= 6.0).copied().collect();
+        let at = |x: f32| tops.iter().filter(|v| v.pos[0] == x).map(|v| v.light[1]).fold(0.0, f32::max);
+        assert!(at(6.0) > at(5.0) - 1e-6 && at(6.0) > 0.3, "block light at the lit side: {} {}", at(6.0), at(5.0));
+        assert!(tops.iter().all(|v| v.light[1] <= 12.0 / 15.0 + 1e-6 && v.light[0] >= 0.0));
+    }
+
+    #[test]
+    fn water_goes_to_the_translucent_list_with_partial_alpha() {
+        let mut c = Chunk::empty(0, 0);
+        c.set(5, 70, 5, &BlockState::fluid("minecraft:water", 0));
+        c.set(9, 70, 9, &BlockState::simple("minecraft:stone"));
+        let m = mesh_chunk(&c, [None; 4]);
+        assert_eq!(m.indices.len(), 36, "stone is opaque");
+        assert_eq!(m.translucent.len(), 36, "water faces are translucent");
+        assert!(m.vertices.iter().any(|v| v.alpha == 0.7) && m.vertices.iter().any(|v| v.alpha == 1.0));
+        assert_eq!(translucency("minecraft:red_stained_glass"), Some(0.75));
+        assert_eq!(translucency("minecraft:glass"), None);
+    }
+
+    #[test]
+    fn diagonal_neighbours_are_used_and_missing_ones_do_not_panic() {
+        let (mut centre, mut diag) = (Chunk::empty(0, 0), Chunk::empty(1, 1));
+        let stone = BlockState::simple("minecraft:stone");
+        centre.set(15, 70, 15, &stone);
+        diag.set(0, 71, 0, &stone); // diagonal neighbour block touching the top-face corner of (15,70,15)
+        crate::light::compute(&mut centre); crate::light::compute(&mut diag);
+        let corner_ao = |grid: [[Option<&Chunk>; 3]; 3]| {
+            let m = mesh_chunk_grid(grid, None, true);
+            m.vertices.iter().filter(|v| v.pos[1] == 71.0 && v.pos[0] == 16.0 && v.pos[2] == 16.0).map(|v| v.color[0]).fold(f32::MAX, f32::min)
+        };
+        let none = corner_ao([[None, None, None], [None, Some(&centre), None], [None, None, None]]);
+        let with = corner_ao([[None, None, None], [None, Some(&centre), None], [None, None, Some(&diag)]]);
+        assert!(with < none, "diagonal chunk occludes the shared corner: {with} vs {none}");
+        let _ = mesh_chunk(&centre, [None; 4]); // edge cells with absent neighbours must not index out of range
+    }
+
+    #[test]
+    fn emissive_blocks_ignore_lighting_and_exceed_one() {
+        let mut c = Chunk::empty(0, 0);
+        c.set(5, 70, 5, &BlockState::simple("minecraft:glowstone"));
+        let m = mesh_chunk(&c, [None; 4]);
+        assert!(m.vertices.iter().all(|v| v.light == [1.0, 1.0] && v.color[0] > 1.0));
     }
 }

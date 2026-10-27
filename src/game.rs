@@ -54,6 +54,8 @@ pub struct Game {
     pub entities: EntityWorld,
     pub player: u32,
     pub generator: Arc<Generator>,
+    /// Ticks since world start; drives the day/night cycle. New worlds begin in the morning.
+    pub time: u64,
     accum: f64,
 }
 
@@ -65,7 +67,7 @@ impl Game {
         let mut entities = EntityWorld::new(seed);
         let h = generator.surface_height(0, 0).max(crate::worldgen::SEA_LEVEL) as f64;
         let player = entities.spawn(Kind::Player, [0.5, h + 2.0, 0.5]);
-        Self { blocks: Blocks::default(), fluids: FluidSim::new(), entities, player, generator, accum: 0.0 }
+        Self { blocks: Blocks::default(), fluids: FluidSim::new(), entities, player, generator, time: 1000, accum: 0.0 }
     }
 
     /// Adds a freshly generated/loaded chunk and queues it and its neighbours for meshing.
@@ -167,7 +169,16 @@ impl Game {
         self.edit(pos, b)
     }
 
+    /// (sky, block) light level 0..=15 at a world position, if loaded.
+    pub fn light_at(&self, x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
+        let c = self.blocks.chunks.get(&(x >> 4, z >> 4))?;
+        if !(MIN_Y..MIN_Y + HEIGHT as i32).contains(&y) { return None; }
+        let (lx, lz) = ((x & 15) as usize, (z & 15) as usize);
+        Some((c.sky_light(lx, y, lz), c.block_light(lx, y, lz)))
+    }
+
     pub fn tick(&mut self) {
+        self.time += 1;
         self.fluids.tick(&mut self.blocks);
         self.entities.tick(&self.blocks);
     }
@@ -210,6 +221,17 @@ mod tests {
         }}
         g.entities.get_mut(g.player).unwrap().pos = [0.5, 61.0, 0.5];
         g
+    }
+
+    #[test]
+    fn time_advances_with_ticks_and_light_is_queryable() {
+        let mut g = flat_game();
+        let t0 = g.time;
+        run(&mut g, 1.0);
+        assert_eq!(g.time, t0 + 20, "20 ticks per second");
+        assert_eq!(g.light_at(3, 80, 3).unwrap().0, 15, "open sky");
+        assert!(g.light_at(3, 5, 3).unwrap().0 < 15, "inside the stone");
+        assert!(g.light_at(5000, 80, 3).is_none() && g.light_at(3, 9999, 3).is_none());
     }
 
     #[test]

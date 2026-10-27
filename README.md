@@ -32,3 +32,12 @@ You supply the assets; nothing from Mojang is bundled here.
   UV rotation, cullfaces, tint indices, biome colormaps (`colormap/grass.png`, `foliage.png`).
 - Not yet: item models, entity textures, CTM/OptiFine formats, overlays, language files, sounds, `uvlock`, `ambientocclusion`.
 - `cargo run --release --bin mkpack OUT_DIR` writes a small synthetic pack (procedural textures, animated water/lava).
+
+## Lighting and sky
+
+- Smooth lighting and ambient occlusion per vertex (vanilla-style 4-cell sampling, using all 8 neighbouring chunks),
+  with the quad diagonal flipped along the occlusion gradient. Sky and block light travel separately in the vertex, so the
+  shader scales sky light by the time of day; open ground keeps a moonlight floor at night, caves stay dark.
+- Translucent pass for water, ice and stained glass (alpha-blended, far chunks first, no depth writes).
+- `sky`: 24000-tick day (tick 0 sunrise, 6000 noon, 18000 midnight), sun/moon billboards, stars, dusk tint. Sun is HDR-bright.
+  `T` skips 6000 ticks.
