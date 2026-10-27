@@ -7,3 +7,6 @@ Rust voxel engine experiment with Java-edition save compatibility.
 - `worldgen`: original terrain generator. NOT seed-identical to Java edition.
 
 `cargo run --release --bin mapdump [seed]` writes a top-down `map.ppm`.
+- `world`: Java world folder load/save (level.dat, regions; preserves untouched chunks).
+- `light`: chunk-local sky/block light. `mesh`: face-culled meshing.
+- `cargo run --release --bin render [seed]` software-renders terrain to `render.ppm`.
