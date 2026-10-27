@@ -273,13 +273,18 @@ impl Models {
         Some(vec![Arc::new(quads)])
     }
 
-    /// Baked model for a block state, if the pack defines one. `seed` picks among weighted variants.
-    pub fn model(&self, b: &BlockState, seed: u32) -> Option<Arc<Baked>> {
+    /// All weighted variants for a block state (cached), if the pack defines a model for it.
+    pub fn variants(&self, b: &BlockState) -> Option<Arc<Vec<Arc<Baked>>>> {
         let key = (b.name.clone(), b.props.clone());
-        if let Some(c) = self.states.read().unwrap().get(&key) { return c.as_ref().map(|l| l[seed as usize % l.len()].clone()); }
+        if let Some(c) = self.states.read().unwrap().get(&key) { return c.clone(); }
         let baked = self.bake_state(&b.name, &b.props).map(Arc::new);
         self.states.write().unwrap().insert(key, baked.clone());
-        baked.map(|l| l[seed as usize % l.len()].clone())
+        baked
+    }
+
+    /// Baked model for a block state. `seed` picks among weighted variants.
+    pub fn model(&self, b: &BlockState, seed: u32) -> Option<Arc<Baked>> {
+        self.variants(b).map(|l| l[seed as usize % l.len()].clone())
     }
 }
 

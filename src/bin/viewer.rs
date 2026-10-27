@@ -5,7 +5,9 @@
 use blockengine::access::SharedChunkMap;
 use blockengine::chunk::{BlockState, Chunk};
 use blockengine::game::{Game, Input};
-use blockengine::mesh::{entity_model, mesh_chunk, outline_mesh, Mesh, Vertex};
+use blockengine::mesh::{entity_model, mesh_chunk_with, outline_mesh, Mesh, Vertex};
+use blockengine::model::Models;
+use blockengine::pack::{Pack, PackStack};
 use blockengine::world::{level_seed, read_level_dat, World};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -25,7 +27,7 @@ const DEPTH_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuVertex { pos: [f32; 3], color: [f32; 3] }
+struct GpuVertex { pos: [f32; 3], color: [f32; 3], uv: [f32; 2] }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -66,11 +68,14 @@ fn encode_for_output(lin: [f64; 3], out: Output, paper_white: f32) -> [f64; 3] {
 const SHADER: &str = r#"
 struct U { view_proj: mat4x4<f32>, eye: vec4<f32>, hdr: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
-struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32>, @location(1) d: f32 };
-@vertex fn vs(@location(0) pos: vec3<f32>, @location(1) c: vec3<f32>) -> VOut {
+@group(1) @binding(0) var atlas: texture_2d<f32>;
+@group(1) @binding(1) var atlas_smp: sampler;
+struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32>, @location(1) d: f32, @location(2) uv: vec2<f32> };
+@vertex fn vs(@location(0) pos: vec3<f32>, @location(1) c: vec3<f32>, @location(2) uv: vec2<f32>) -> VOut {
     var o: VOut;
     o.p = u.view_proj * vec4<f32>(pos, 1.0);
     o.c = c;
+    o.uv = uv;
     o.d = distance(pos, u.eye.xyz);
     return o;
 }
@@ -78,7 +83,10 @@ struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32>, @locat
     let fog = clamp(i.d / (u.eye.w), 0.0, 1.0);
     let sky = vec3<f32>(0.6, 0.75, 0.95);
     // Colours are authored in sRGB; decode to linear light. Emissive blocks exceed 1.0.
-    var lin = pow(mix(i.c, sky, fog * fog), vec3<f32>(2.2));
+    let t = textureSample(atlas, atlas_smp, i.uv);
+    if (t.a < 0.1) { discard; }
+    // Vertex colour carries light, shade and biome tint (sRGB-authored); the sRGB atlas decodes to linear on sampling.
+    var lin = mix(pow(i.c, vec3<f32>(2.2)) * t.rgb, pow(sky, vec3<f32>(2.2)), fog * fog);
     if (u.hdr.x < 0.5) {
         // SDR can't show >1.0: scale by the brightest channel so emissive blocks keep their hue instead of clipping to yellow.
         let m = max(max(lin.r, lin.g), lin.b);
@@ -128,6 +136,7 @@ struct Gfx {
     window: Arc<Window>, surface: wgpu::Surface<'static>, device: wgpu::Device, queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration, pipeline: wgpu::RenderPipeline, depth: wgpu::TextureView,
     ubuf: wgpu::Buffer, bind: wgpu::BindGroup, ubuf_ui: wgpu::Buffer, bind_ui: wgpu::BindGroup, output: Output,
+    atlas_tex: wgpu::Texture, atlas_bind: wgpu::BindGroup,
     dyn_vb: wgpu::Buffer, dyn_ib: wgpu::Buffer, ui_vb: wgpu::Buffer, ui_ib: wgpu::Buffer,
 }
 
@@ -160,6 +169,7 @@ struct App {
     yaw: f32, pitch: f32,
     keys: HashSet<KeyCode>, grabbed: bool, last: Instant,
     want_hdr: bool, paper_white: f32, output: Output,
+    models: Arc<Models>, textured: bool, anim_state: Vec<u64>, t0: Instant,
     selected: usize, mouse_left: bool, mouse_right: bool, click_left: bool, click_right: bool, act_cd: f32, title_t: f32,
 }
 
@@ -205,13 +215,36 @@ impl App {
         let mk_bind = |b: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None, layout: &bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: b.as_entire_binding() }] });
         let (bind, bind_ui) = (mk_bind(&ubuf), mk_bind(&ubuf_ui));
+        // Block atlas: nearest-sampled, sRGB. Animated tiles are rewritten in place as the tick advances.
+        let a = &self.models.atlas;
+        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None, size: wgpu::Extent3d { width: a.width, height: a.height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &atlas_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &a.pixels,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(a.width * 4), rows_per_image: Some(a.height) },
+            wgpu::Extent3d { width: a.width, height: a.height, depth_or_array_layers: 1 });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
+        let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[
+            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, count: None,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false } },
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, count: None, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering) },
+        ] });
+        let atlas_view = atlas_tex.create_view(&Default::default());
+        let atlas_bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &tex_bgl, entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ] });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
-        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+            label: None, bind_group_layouts: &[Some(&bgl), Some(&tex_bgl)], immediate_size: 0 });
+        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None, layout: Some(&layout),
             vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 24, step_mode: wgpu::VertexStepMode::Vertex, attributes: &attrs })] },
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 32, step_mode: wgpu::VertexStepMode::Vertex, attributes: &attrs })] },
             fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs"), compilation_options: Default::default(),
                 targets: &[Some(config.format.into())] }),
             primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
@@ -223,9 +256,9 @@ impl App {
         let mk_buf = |size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false });
         let vu = wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST;
         let iu = wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST;
-        let (dyn_vb, dyn_ib) = (mk_buf((DYN_VERTS * 24) as u64, vu), mk_buf((DYN_VERTS * 6 * 4) as u64, iu));
-        let (ui_vb, ui_ib) = (mk_buf(24 * 16, vu), mk_buf(4 * 16, iu));
-        self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind, ubuf_ui, bind_ui, output,
+        let (dyn_vb, dyn_ib) = (mk_buf((DYN_VERTS * 32) as u64, vu), mk_buf((DYN_VERTS * 6 * 4) as u64, iu));
+        let (ui_vb, ui_ib) = (mk_buf(32 * 16, vu), mk_buf(4 * 16, iu));
+        self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind, ubuf_ui, bind_ui, output, atlas_tex, atlas_bind,
             dyn_vb, dyn_ib, ui_vb, ui_ib });
     }
 
@@ -293,7 +326,27 @@ impl App {
                     HOTBAR[self.selected].0, self.selected + 1, p[0], p[1], p[2], self.chunks.len()));
             }
         }
+        self.animate_textures();
         self.stream();
+    }
+
+    /// Rewrites animated atlas tiles whose frame changed (animations run on a 20 Hz client tick).
+    fn animate_textures(&mut self) {
+        let Some(g) = &self.gfx else { return };
+        let tick = (self.t0.elapsed().as_secs_f64() * 20.0) as u64;
+        let anims = &self.models.atlas.animations;
+        if self.anim_state.len() != anims.len() { self.anim_state = vec![u64::MAX; anims.len()]; }
+        let tile = self.models.atlas.tile;
+        for (a, last) in anims.iter().zip(self.anim_state.iter_mut()) {
+            let st = a.state_at(tick);
+            if *last == st { continue; }
+            *last = st;
+            g.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &g.atlas_tex, mip_level: 0, origin: wgpu::Origin3d { x: a.origin.0, y: a.origin.1, z: 0 }, aspect: wgpu::TextureAspect::All },
+                &a.pixels_at(tick),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(tile * 4), rows_per_image: Some(tile) },
+                wgpu::Extent3d { width: tile, height: tile, depth_or_array_layers: 1 });
+        }
     }
 
     /// Chunk loading, meshing jobs, GPU uploads and unloading.
@@ -306,7 +359,7 @@ impl App {
                     self.in_flight_meshes -= 1;
                     if self.mesh_seq.get(&(x, z)) != Some(&seq) { continue; } // superseded by a newer job
                     if mesh.indices.is_empty() { self.chunks.remove(&(x, z)); continue; }
-                    let verts: Vec<GpuVertex> = mesh.vertices.iter().map(|v: &Vertex| GpuVertex { pos: [v.pos[0] + x as f32 * 16.0, v.pos[1], v.pos[2] + z as f32 * 16.0], color: v.color }).collect();
+                    let verts: Vec<GpuVertex> = mesh.vertices.iter().map(|v: &Vertex| GpuVertex { pos: [v.pos[0] + x as f32 * 16.0, v.pos[1], v.pos[2] + z as f32 * 16.0], color: v.color, uv: v.uv }).collect();
                     let vb = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX });
                     let ib = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&mesh.indices), usage: wgpu::BufferUsages::INDEX });
                     self.chunks.insert((x, z), ChunkGpu { vb, ib, n: mesh.indices.len() as u32 });
@@ -358,13 +411,13 @@ impl App {
             let seq = self.next_seq;
             self.mesh_seq.insert((x, z), seq);
             self.in_flight_meshes += 1;
-            let tx = self.tx.clone();
+            let (tx, models) = (self.tx.clone(), self.textured.then(|| self.models.clone()));
             rayon::spawn(move || {
                 // Private copy-on-write view so stitching light never disturbs the live world.
                 let mut map: SharedChunkMap = snapshot.into_iter().collect();
                 blockengine::light::stitch(&mut map, x, z);
                 let n = |dx, dz| map.get(&(x + dx, z + dz)).map(|c| &**c);
-                let mesh = mesh_chunk(&map[&(x, z)], [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)]);
+                let mesh = mesh_chunk_with(&map[&(x, z)], [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)], models.as_deref());
                 let _ = tx.send(Msg::Mesh { x, z, seq, mesh });
             });
         }
@@ -400,7 +453,7 @@ impl App {
         dynm.vertices.truncate(DYN_VERTS);
         dynm.indices.retain(|&i| (i as usize) < dynm.vertices.len());
         dynm.indices.truncate(dynm.indices.len() / 3 * 3);
-        let dverts: Vec<GpuVertex> = dynm.vertices.iter().map(|v| GpuVertex { pos: v.pos, color: v.color }).collect();
+        let dverts: Vec<GpuVertex> = dynm.vertices.iter().map(|v| GpuVertex { pos: v.pos, color: v.color, uv: v.uv }).collect();
         g.queue.write_buffer(&g.dyn_vb, 0, bytemuck::cast_slice(&dverts));
         g.queue.write_buffer(&g.dyn_ib, 0, bytemuck::cast_slice(&dynm.indices));
         // Crosshair: two quads in NDC, aspect-corrected.
@@ -409,7 +462,7 @@ impl App {
         let white = [1.0f32, 1.0, 1.0];
         let quad = |x0: f32, y0: f32, x1: f32, y1: f32| [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
         let mut ui: Vec<GpuVertex> = Vec::new();
-        for q in [quad(-ax, -t, ax, t), quad(-tx, -a, tx, a)] { for p in q { ui.push(GpuVertex { pos: [p[0], p[1], 0.0], color: white }); } }
+        for q in [quad(-ax, -t, ax, t), quad(-tx, -a, tx, a)] { for p in q { ui.push(GpuVertex { pos: [p[0], p[1], 0.0], color: white, uv: [0.0, 0.0] }); } }
         g.queue.write_buffer(&g.ui_vb, 0, bytemuck::cast_slice(&ui));
         g.queue.write_buffer(&g.ui_ib, 0, bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]));
 
@@ -432,6 +485,7 @@ impl App {
             });
             p.set_pipeline(&g.pipeline);
             p.set_bind_group(0, &g.bind, &[]);
+            p.set_bind_group(1, &g.atlas_bind, &[]);
             for c in self.chunks.values() {
                 p.set_vertex_buffer(0, c.vb.slice(..));
                 p.set_index_buffer(c.ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -520,8 +574,19 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let want_hdr = !args.iter().any(|a| a == "--sdr");
     let allow_write = args.iter().any(|a| a == "--write");
+    let mut packs = PackStack::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--pack" {
+            let Some(path) = it.next() else { eprintln!("--pack needs a path"); std::process::exit(2) };
+            match Pack::open(path) { Ok(p) => { eprintln!("resource pack: {}", p.name); packs.push(p); } Err(e) => { eprintln!("cannot open pack {path}: {e}"); std::process::exit(2) } }
+        }
+    }
+    let textured = !packs.is_empty();
+    let models = Arc::new(Models::new(packs));
+    if textured { eprintln!("atlas {}x{} (tile {}px), {} animated textures", models.atlas.width, models.atlas.height, models.atlas.tile, models.atlas.animations.len()); }
     let paper_white = args.iter().find_map(|a| a.strip_prefix("--paper-white=")?.parse().ok()).unwrap_or(203.0f32);
-    let arg = args.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "1".into());
+    let arg = { let mut skip = false; args.iter().find(|a| { if skip { skip = false; return false; } if a.as_str() == "--pack" { skip = true; return false; } !a.starts_with("--") }) }.cloned().unwrap_or_else(|| "1".into());
     let path = std::path::Path::new(&arg);
     let (seed, read_dir, save_dir) = if path.join("level.dat").exists() {
         let seed = read_level_dat(path).ok().and_then(|l| level_seed(&l)).unwrap_or(0);
@@ -546,7 +611,8 @@ fn main() {
         gfx: None, game, src: Source { read: Arc::new(Mutex::new(World::open(read_dir))), save_dir },
         tx, rx, pending_gen: HashSet::new(), mesh_seq: HashMap::new(), next_seq: 0, in_flight_meshes: 0, chunks: HashMap::new(),
         yaw: 0.0, pitch: -0.3, keys: HashSet::new(), grabbed: false, last: Instant::now(),
-        want_hdr, paper_white, output: Output::Sdr, selected: 0, mouse_left: false, mouse_right: false, click_left: false, click_right: false, act_cd: 0.0, title_t: 0.0,
+        want_hdr, paper_white, output: Output::Sdr, models, textured, anim_state: Vec::new(), t0: Instant::now(),
+        selected: 0, mouse_left: false, mouse_right: false, click_left: false, click_right: false, act_cd: 0.0, title_t: 0.0,
     };
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);
