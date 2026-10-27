@@ -271,6 +271,22 @@ impl Game {
         }
     }
 
+    /// Throws the selected item out in front of the player (one, or the whole stack). `yaw` is the view heading.
+    pub fn drop_selected(&mut self, whole_stack: bool, yaw: f64) -> bool {
+        let Some(stack) = self.inventory.selected_stack().cloned() else { return false };
+        let n = if whole_stack { stack.count } else { 1 };
+        let sel = self.inventory.selected;
+        match &mut self.inventory.slots[sel] {
+            Some(s) if s.count > n => s.count -= n,
+            slot => *slot = None,
+        }
+        let p = self.player_pos();
+        let (sy, cy) = yaw.sin_cos();
+        let e = self.entities.spawn_item(ItemStack { name: stack.name, count: n }, [p[0], p[1] + 1.3, p[2]], [sy * 0.25, 0.1, cy * 0.25]);
+        if let Some(e) = self.entities.get_mut(e) { e.pickup_delay = 40; } // two seconds, so you don't instantly pick it back up
+        true
+    }
+
     pub fn damage(&mut self, amount: f32) {
         if self.mode == GameMode::Creative || amount <= 0.0 { return; }
         self.health -= amount;
@@ -648,5 +664,20 @@ mod tests {
         let far = g.entities.spawn_item(ItemStack::new("dirt", 1), [20.5, 61.0, 20.5], [0.0; 3]);
         for _ in 0..crate::entity::ITEM_LIFETIME + 5 { g.tick(); }
         assert!(g.entities.get_mut(far).is_none());
+    }
+
+    #[test]
+    fn dropping_items_throws_them_forward_with_a_long_pickup_delay() {
+        let mut g = survival_game();
+        g.inventory.slots[0] = Some(ItemStack::new("stone", 5));
+        assert!(g.drop_selected(false, 0.0));
+        assert_eq!(g.inventory.count("stone"), 4);
+        for _ in 0..15 { g.tick(); }
+        assert_eq!(g.inventory.count("stone"), 4, "thrown items aren't re-collected immediately");
+        let item = g.entities.entities.iter().find(|e| e.kind == Kind::Item).unwrap();
+        assert!(item.pos[2] > 0.9, "thrown along +z for yaw 0: {:?}", item.pos);
+        assert!(g.drop_selected(true, 0.0));
+        assert_eq!(g.inventory.count("stone"), 0);
+        assert!(!g.drop_selected(false, 0.0), "nothing left to drop");
     }
 }

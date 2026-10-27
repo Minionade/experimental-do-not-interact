@@ -156,6 +156,13 @@ impl Models {
         }
     }
 
+    /// Atlas rect for an item's inventory icon: its item texture, else a block texture (top, side, front or plain).
+    pub fn item_icon(&self, item: &str) -> Option<(f32, f32, f32, f32)> {
+        let n = item.strip_prefix("minecraft:").unwrap_or(item);
+        [format!("item/{n}"), format!("block/{n}"), format!("block/{n}_top"), format!("block/{n}_side"), format!("block/{n}_front")]
+            .iter().find(|id| self.atlas.contains(id)).map(|id| self.atlas.rect(id))
+    }
+
     /// Fluid texture rect and whether it is tinted.
     pub fn fluid_texture(&self, name: &str) -> (f32, f32, f32, f32) {
         self.atlas.rect(if name == "minecraft:lava" { "block/lava_still" } else { "block/water_still" })
@@ -446,6 +453,20 @@ mod tests {
         let miss = m.atlas.rect("blockengine:missing");
         assert!(b.quads[0].uv[0][0] >= miss.0 && b.quads[0].uv[0][0] <= miss.2);
         assert!(Arc::ptr_eq(&m.model(&bs("minecraft:dirt", ""), 2).unwrap(), &a), "seed wraps around the variant list");
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn item_icons_prefer_item_textures_then_block_faces() {
+        let (m, d) = pack(&[
+            ("assets/minecraft/textures/item/stick.png", png_bytes(2, 2, &solid(2, 2, [200, 150, 50, 255]))),
+            ("assets/minecraft/textures/block/stone.png", png_bytes(2, 2, &solid(2, 2, [90, 90, 90, 255]))),
+            ("assets/minecraft/textures/block/oak_log_top.png", png_bytes(2, 2, &solid(2, 2, [160, 130, 80, 255]))),
+        ]);
+        assert!(m.item_icon("minecraft:stick").is_some() && m.item_icon("stone").is_some());
+        assert_eq!(m.item_icon("oak_log"), Some(m.atlas.rect("block/oak_log_top")), "falls back to the block's top face");
+        assert!(m.item_icon("nonexistent").is_none());
+        assert_ne!(m.item_icon("stick"), m.item_icon("stone"));
         std::fs::remove_dir_all(d).ok();
     }
 

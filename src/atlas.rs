@@ -95,10 +95,11 @@ impl Atlas {
         for path in packs.list("assets/") {
             let Some(rest) = path.strip_prefix("assets/") else { continue };
             let Some((ns, rest)) = rest.split_once('/') else { continue };
-            let Some(name) = rest.strip_prefix("textures/block/").and_then(|n| n.strip_suffix(".png")) else { continue };
+            // Block textures feed the models; item textures feed inventory icons.
+            let Some((kind, name)) = ["block", "item"].iter().find_map(|k| Some((*k, rest.strip_prefix(&format!("textures/{k}/"))?.strip_suffix(".png")?))) else { continue };
             let Some(img) = packs.read(&path).and_then(|b| decode_png(&b)) else { continue };
             let meta = packs.read_json(&format!("{path}.mcmeta"));
-            let key = format!("{ns}:block/{name}");
+            let key = format!("{ns}:{kind}/{name}");
             match meta.as_ref().and_then(|m| parse_animation(&img, m)) {
                 Some((frames, seq, interpolate)) => entries.push(Entry { key, frames, seq, interpolate }),
                 None => {
