@@ -1,5 +1,6 @@
 //! Entities with AABB-vs-voxel physics, stepped at 20 ticks per second.
 use crate::access::BlockAccess;
+use crate::item::ItemStack;
 use crate::rng::JavaRandom;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,8 +29,18 @@ pub struct Entity {
     pub flying: bool,
     /// Heading in radians; forward is (sin yaw, cos yaw). Updated from `wish` while moving.
     pub yaw: f64,
+    /// Set for `Kind::Item` entities.
+    pub item: Option<ItemStack>,
+    pub age: u32,
+    pub pickup_delay: u32,
+    /// Distance fallen since last touching ground/water; `landed_fall` is set on impact until a consumer clears it.
+    pub fall_distance: f64,
+    pub landed_fall: f64,
     wander_timer: u32,
 }
+
+/// Dropped items vanish after five minutes.
+pub const ITEM_LIFETIME: u32 = 6000;
 
 const GRAVITY: f64 = 0.08;
 const EPS: f64 = 1e-7;
@@ -93,6 +104,12 @@ impl Entity {
         let dy = self.vel[1];
         let moved_y = self.move_axis(w, 1, dy);
         if moved_y != dy { self.on_ground = dy < 0.0; self.vel[1] = 0.0; } else { self.on_ground = false; }
+        if moved_y < 0.0 { self.fall_distance -= moved_y; }
+        if self.in_water || self.flying { self.fall_distance = 0.0; }
+        if self.on_ground {
+            if self.fall_distance > 0.0 { self.landed_fall = self.fall_distance; }
+            self.fall_distance = 0.0;
+        }
         for axis in [0, 2] {
             let d = self.vel[axis];
             if self.move_axis(w, axis, d) != d { self.vel[axis] = 0.0; }
@@ -121,9 +138,22 @@ impl EntityWorld {
         let id = self.next_id;
         self.next_id += 1;
         self.entities.push(Entity { id, kind, pos, vel: [0.0; 3], on_ground: false, in_water: false,
-            wish: [0.0; 2], jump: false, sneak: false, flying: false, yaw: 0.0, wander_timer: 0 });
+            wish: [0.0; 2], jump: false, sneak: false, flying: false, yaw: 0.0, item: None, age: 0, pickup_delay: 0,
+            fall_distance: 0.0, landed_fall: 0.0, wander_timer: 0 });
         id
     }
+
+    /// Spawns a dropped item with an initial velocity; it can't be picked up for half a second.
+    pub fn spawn_item(&mut self, stack: ItemStack, pos: [f64; 3], vel: [f64; 3]) -> u32 {
+        let id = self.spawn(Kind::Item, pos);
+        let e = self.get_mut(id).unwrap();
+        e.item = Some(stack);
+        e.vel = vel;
+        e.pickup_delay = 10;
+        id
+    }
+
+    pub fn remove(&mut self, id: u32) { self.entities.retain(|e| e.id != id); }
 
     pub fn get_mut(&mut self, id: u32) -> Option<&mut Entity> { self.entities.iter_mut().find(|e| e.id == id) }
 
@@ -132,6 +162,8 @@ impl EntityWorld {
         for e in &mut self.entities {
             // Freeze entities whose chunk isn't loaded rather than letting them fall through the void.
             if w.block(e.pos[0].floor() as i32, e.pos[1].floor() as i32, e.pos[2].floor() as i32).is_none() { continue; }
+            e.age += 1;
+            e.pickup_delay = e.pickup_delay.saturating_sub(1);
             if e.kind == Kind::Pig {
                 // Simple wander AI: every 1-4 s pick a new heading, or stand still.
                 if e.wander_timer == 0 {
@@ -151,6 +183,7 @@ impl EntityWorld {
             }
             e.step(w);
         }
+        self.entities.retain(|e| e.kind != Kind::Item || e.age < ITEM_LIFETIME);
     }
 }
 
