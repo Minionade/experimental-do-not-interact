@@ -35,10 +35,40 @@ impl Region {
             1 => { GzDecoder::new(body).read_to_end(&mut raw)?; }
             2 => { ZlibDecoder::new(body).read_to_end(&mut raw)?; }
             3 => raw.extend_from_slice(body),
-            4 => return Err(bad("LZ4 chunk compression not supported yet")),
+            4 => raw = lz4_block_stream(body).map_err(|e| bad(e))?,
             _ => return Err(bad("unknown compression")),
         }
         Ok(Some(nbt::read_root(&mut &raw[..])?.1))
+    }
+}
+
+/// Decodes lz4-java's LZ4BlockOutputStream framing, used for Java chunk compression type 4.
+fn lz4_block_stream(mut b: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut out = Vec::new();
+    while !b.is_empty() {
+        if b.len() < 21 || &b[..8] != b"LZ4Block" { return Err("bad LZ4 block header"); }
+        let token = b[8];
+        let clen = u32::from_le_bytes(b[9..13].try_into().unwrap()) as usize;
+        let dlen = u32::from_le_bytes(b[13..17].try_into().unwrap()) as usize;
+        let data = b.get(21..21 + clen).ok_or("truncated LZ4 block")?;
+        match token & 0xF0 {
+            0x10 => out.extend_from_slice(data),
+            0x20 => out.extend(lz4_flex::block::decompress(data, dlen).map_err(|_| "lz4 decode failed")?),
+            _ => return Err("bad LZ4 block method"),
+        }
+        b = &b[21 + clen..];
+    }
+    Ok(out)
+}
+
+/// All generated chunks in the region as (lx, lz, tag).
+impl Region {
+    pub fn chunks(&self) -> Vec<(usize, usize, Tag)> {
+        let mut v = Vec::new();
+        for lz in 0..32 { for lx in 0..32 {
+            if let Ok(Some(t)) = self.read_chunk(lx, lz) { v.push((lx, lz, t)); }
+        }}
+        v
     }
 }
 
@@ -77,5 +107,22 @@ mod tests {
         let r = Region::from_bytes(bytes);
         assert_eq!(r.read_chunk(3, 7).unwrap(), Some(t));
         assert_eq!(r.read_chunk(0, 0).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod lz4_tests {
+    use super::*;
+    #[test]
+    fn lz4_stream_decodes() {
+        let raw = b"hello hello hello hello hello hello".to_vec();
+        let c = lz4_flex::block::compress(&raw);
+        let mut s = b"LZ4Block".to_vec();
+        s.push(0x20 | 10);
+        s.extend((c.len() as u32).to_le_bytes());
+        s.extend((raw.len() as u32).to_le_bytes());
+        s.extend([0u8; 4]);
+        s.extend(&c);
+        assert_eq!(lz4_block_stream(&s).unwrap(), raw);
     }
 }
