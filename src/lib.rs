@@ -1,5 +1,8 @@
 //! blockengine: voxel engine with Java-edition save compatibility.
+pub mod access;
 pub mod anvil;
+pub mod entity;
+pub mod fluid;
 pub mod light;
 pub mod mesh;
 pub mod world;

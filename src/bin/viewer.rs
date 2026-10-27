@@ -252,9 +252,14 @@ impl App {
             self.st.pending.insert((x, z));
             let (generator, cache, tx, world) = (self.st.generator.clone(), self.st.cache.clone(), self.st.tx.clone(), self.st.saved.clone());
             rayon::spawn(move || {
-                let get = |dx, dz| get_chunk(&cache, &generator, &world, x + dx, z + dz);
-                let (c, a, b, n, s) = (get(0, 0), get(-1, 0), get(1, 0), get(0, -1), get(0, 1));
-                let m = mesh_chunk(&c, [Some(&a), Some(&b), Some(&n), Some(&s)]);
+                // Clone the 3x3 neighbourhood so light can be stitched across borders without mutating the cache.
+                let mut map = blockengine::access::ChunkMap::new();
+                for dx in -1..=1 { for dz in -1..=1 {
+                    map.insert((x + dx, z + dz), (*get_chunk(&cache, &generator, &world, x + dx, z + dz)).clone());
+                }}
+                blockengine::light::stitch(&mut map, x, z);
+                let n = |dx, dz| map.get(&(x + dx, z + dz));
+                let m = mesh_chunk(&map[&(x, z)], [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)]);
                 // keep the cache bounded
                 let mut cc = cache.lock().unwrap();
                 if cc.len() > 4000 { cc.clear(); }

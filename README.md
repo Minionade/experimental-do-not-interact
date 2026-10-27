@@ -13,3 +13,6 @@ Rust voxel engine experiment with Java-edition save compatibility.
 - `cargo run --release --features gpu --bin viewer [seed|java-world-dir] [--sdr] [--paper-white=NITS]`:
   wgpu viewer (WASD/Space/Shift, click to grab mouse, Ctrl sprint). Native HDR: uses scRGB
   (Rgba16Float) when available, else HDR10/PQ, else SDR. Emissive blocks (lava, glowstone) go above 1.0.
+- `access`: `BlockAccess` trait over world coordinates. `light::stitch` carries light across chunk borders.
+- `fluid`: tick-scheduled water/lava flow (7/3 block spread, falling, drain, lava+water contact).
+- `entity`: AABB-vs-voxel physics (gravity, step/jump, walls, swimming) and a wandering pig.

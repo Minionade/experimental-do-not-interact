@@ -13,6 +13,19 @@ impl BlockState {
     pub fn air() -> Self { Self { name: "minecraft:air".into(), props: String::new() } }
     pub fn simple(name: &str) -> Self { Self { name: name.into(), props: String::new() } }
     pub fn is_air(&self) -> bool { matches!(self.name.as_str(), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") }
+    /// Blocks entities collide with. Fluids, air, torches and plants are passable.
+    pub fn is_solid(&self) -> bool {
+        !self.is_air() && !matches!(self.name.as_str(),
+            "minecraft:water" | "minecraft:lava" | "minecraft:torch" | "minecraft:short_grass" | "minecraft:fire")
+    }
+    /// Fluid level from the `level` property: 0 = source, 1..=7 flowing, 8+ falling. None if not a fluid.
+    pub fn fluid_level(&self) -> Option<u8> {
+        if !matches!(self.name.as_str(), "minecraft:water" | "minecraft:lava") { return None; }
+        Some(self.props.split(',').find_map(|kv| kv.strip_prefix("level=")?.parse().ok()).unwrap_or(0))
+    }
+    pub fn fluid(name: &str, level: u8) -> Self {
+        Self { name: name.into(), props: if level == 0 { String::new() } else { format!("level={level}") } }
+    }
     fn from_nbt(t: &Tag) -> Self {
         let name = t.get("Name").and_then(Tag::as_str).unwrap_or("minecraft:air").to_string();
         let props = match t.get("Properties") {
@@ -85,6 +98,7 @@ fn bits_for(palette_len: usize, min: usize) -> usize {
     ((usize::BITS - (palette_len.max(2) - 1).leading_zeros()) as usize).max(min)
 }
 
+#[derive(Clone)]
 pub struct Chunk { pub x: i32, pub z: i32, pub sections: Vec<Section> }
 
 impl Chunk {
