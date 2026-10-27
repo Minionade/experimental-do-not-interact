@@ -24,6 +24,10 @@ pub struct Entity {
     /// Desired horizontal movement direction (unit-ish), set by AI or player input.
     pub wish: [f64; 2],
     pub jump: bool,
+    pub sneak: bool,
+    pub flying: bool,
+    /// Heading in radians; forward is (sin yaw, cos yaw). Updated from `wish` while moving.
+    pub yaw: f64,
     wander_timer: u32,
 }
 
@@ -75,11 +79,13 @@ impl Entity {
 
     pub fn step(&mut self, w: &impl BlockAccess) {
         self.in_water = self.touching_water(w);
+        if self.wish != [0.0; 2] { self.yaw = self.wish[0].atan2(self.wish[1]); }
         // Horizontal acceleration toward the wish direction.
-        let accel = if self.on_ground { 0.1 } else { 0.02 } * if self.in_water { 0.4 } else { 1.0 };
+        let accel = if self.flying { 0.1 } else if self.on_ground { 0.1 } else { 0.02 } * if self.in_water { 0.4 } else { 1.0 };
         self.vel[0] += self.wish[0] * accel;
         self.vel[2] += self.wish[1] * accel;
-        if self.jump {
+        if self.flying { self.vel[1] = if self.jump { 0.45 } else if self.sneak { -0.45 } else { 0.0 }; }
+        else if self.jump {
             if self.in_water { self.vel[1] += 0.04; }
             else if self.on_ground { self.vel[1] = 0.42; }
         }
@@ -96,6 +102,7 @@ impl Entity {
         let h_drag = if self.in_water { 0.8 } else if self.on_ground { 0.6 * 0.91 } else { 0.91 };
         self.vel[0] *= h_drag;
         self.vel[2] *= h_drag;
+        if self.flying { self.on_ground = false; return; }
         self.vel[1] = if self.in_water { self.vel[1] * 0.8 - 0.02 } else { (self.vel[1] - GRAVITY) * 0.98 };
     }
 }
@@ -114,7 +121,7 @@ impl EntityWorld {
         let id = self.next_id;
         self.next_id += 1;
         self.entities.push(Entity { id, kind, pos, vel: [0.0; 3], on_ground: false, in_water: false,
-            wish: [0.0; 2], jump: false, wander_timer: 0 });
+            wish: [0.0; 2], jump: false, sneak: false, flying: false, yaw: 0.0, wander_timer: 0 });
         id
     }
 
@@ -123,6 +130,8 @@ impl EntityWorld {
     pub fn tick(&mut self, w: &impl BlockAccess) {
         self.tick += 1;
         for e in &mut self.entities {
+            // Freeze entities whose chunk isn't loaded rather than letting them fall through the void.
+            if w.block(e.pos[0].floor() as i32, e.pos[1].floor() as i32, e.pos[2].floor() as i32).is_none() { continue; }
             if e.kind == Kind::Pig {
                 // Simple wander AI: every 1-4 s pick a new heading, or stand still.
                 if e.wander_timer == 0 {

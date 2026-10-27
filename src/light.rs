@@ -1,5 +1,5 @@
 //! Chunk-local light propagation (sky + block light) via BFS.
-use crate::access::{BlockAccess, ChunkMap};
+use crate::access::{BlockAccess, ChunkMap, ChunkStore};
 use crate::chunk::{Chunk, HEIGHT, MIN_Y};
 use std::collections::VecDeque;
 
@@ -44,8 +44,17 @@ pub fn compute(c: &mut Chunk) {
             if l == 0 { break; }
         }
     }}
+    // Only cells that can actually brighten a neighbour need to seed the BFS.
     for y in 0..HEIGHT { for z in 0..16 { for x in 0..16 {
-        if sky[idx(x, y, z)] > 1 { q.push_back((x, y, z)); }
+        let cur = sky[idx(x, y, z)];
+        if cur <= 1 { continue; }
+        let lights_up = [(1i32, 0i32, 0i32), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)].iter().any(|&(dx, dy, dz)| {
+            let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+            if !(0..16).contains(&nx) || !(0..16).contains(&nz) || !(0..HEIGHT as i32).contains(&ny) { return false; }
+            let n = idx(nx as usize, ny as usize, nz as usize);
+            op[n] < 15 && sky[n] + 1 + op[n] < cur
+        });
+        if lights_up { q.push_back((x, y, z)); }
     }}}
     spread(&mut sky, &op, &mut q);
     for y in 0..HEIGHT { for z in 0..16 { for x in 0..16 {
@@ -80,14 +89,14 @@ fn spread(l: &mut [u8], op: &[u8], q: &mut VecDeque<(usize, usize, usize)>) {
 #[derive(Clone, Copy)]
 enum Kind { Sky, Block }
 
-fn level(chunks: &ChunkMap, wx: i32, y: i32, wz: i32, k: Kind) -> u8 {
-    let c = &chunks[&(wx >> 4, wz >> 4)];
+fn level(store: &impl ChunkStore, wx: i32, y: i32, wz: i32, k: Kind) -> u8 {
+    let c = store.chunk(wx >> 4, wz >> 4).expect("chunk present");
     let (lx, lz) = ((wx & 15) as usize, (wz & 15) as usize);
     match k { Kind::Sky => c.sky_light(lx, y, lz), Kind::Block => c.block_light(lx, y, lz) }
 }
 
-fn set_level(chunks: &mut ChunkMap, wx: i32, y: i32, wz: i32, k: Kind, v: u8) {
-    let c = chunks.get_mut(&(wx >> 4, wz >> 4)).unwrap();
+fn set_level(store: &mut impl ChunkStore, wx: i32, y: i32, wz: i32, k: Kind, v: u8) {
+    let c = store.chunk_mut(wx >> 4, wz >> 4).expect("chunk present");
     let ry = (y - MIN_Y) as usize;
     let i = (ry % 16) * 256 + (wz & 15) as usize * 16 + (wx & 15) as usize;
     let s = &mut c.sections[ry / 16];
@@ -96,30 +105,38 @@ fn set_level(chunks: &mut ChunkMap, wx: i32, y: i32, wz: i32, k: Kind, v: u8) {
 
 /// Carries light across chunk borders in the 3x3 neighbourhood of (cx, cz).
 /// Each chunk must already have been through `compute`. Call after a chunk's neighbours load.
-pub fn stitch(chunks: &mut ChunkMap, cx: i32, cz: i32) {
-    let region = |x: i32, z: i32| ((x >> 4) - cx).abs() <= 1 && ((z >> 4) - cz).abs() <= 1;
+pub fn stitch(store: &mut impl ChunkStore, cx: i32, cz: i32) {
+    let region = |x: i32, z: i32| (x - cx).abs() <= 1 && (z - cz).abs() <= 1;
     for k in [Kind::Sky, Kind::Block] {
         let mut q: VecDeque<(i32, i32, i32)> = VecDeque::new();
+        // Seed from border cell pairs whose levels differ by more than 1, no hashing in the inner loop.
         for dx in -1..=1 { for dz in -1..=1 {
-            if !chunks.contains_key(&(cx + dx, cz + dz)) { continue; }
-            for y in MIN_Y..MIN_Y + HEIGHT as i32 { for i in 0..16 { for e in [0, 15] {
-                for (lx, lz) in [(e, i), (i, e)] {
-                    let (wx, wz) = ((cx + dx) * 16 + lx, (cz + dz) * 16 + lz);
-                    if level(chunks, wx, y, wz, k) > 1 { q.push_back((wx, y, wz)); }
-                }
-            }}}
+            let (ax, az) = (cx + dx, cz + dz);
+            for (bx, bz, axis) in [(ax + 1, az, 0), (ax, az + 1, 1)] {
+                if !region(bx, bz) { continue; }
+                let (Some(a), Some(b)) = (store.chunk(ax, az), store.chunk(bx, bz)) else { continue };
+                for y in MIN_Y..MIN_Y + HEIGHT as i32 { for i in 0..16usize {
+                    let ((alx, alz), (blx, blz)) = if axis == 0 { ((15, i), (0, i)) } else { ((i, 15), (i, 0)) };
+                    let (la, lb) = match k {
+                        Kind::Sky => (a.sky_light(alx, y, alz), b.sky_light(blx, y, blz)),
+                        Kind::Block => (a.block_light(alx, y, alz), b.block_light(blx, y, blz)),
+                    };
+                    if la > lb + 1 { q.push_back((ax * 16 + alx as i32, y, az * 16 + alz as i32)); }
+                    if lb > la + 1 { q.push_back((bx * 16 + blx as i32, y, bz * 16 + blz as i32)); }
+                }}
+            }
         }}
         while let Some((x, y, z)) = q.pop_front() {
-            let cur = level(chunks, x, y, z, k);
+            let cur = level(store, x, y, z, k);
             if cur <= 1 { continue; }
             for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
                 let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                if !region(nx, nz) || !chunks.contains_key(&(nx >> 4, nz >> 4)) { continue; }
-                let Some(b) = chunks.block(nx, ny, nz) else { continue };
+                if !region(nx >> 4, nz >> 4) || store.chunk(nx >> 4, nz >> 4).is_none() { continue; }
+                let Some(b) = store.block(nx, ny, nz) else { continue };
                 let op = opacity(&b.name);
                 if op >= 15 { continue; }
                 let v = cur.saturating_sub(1 + op);
-                if v > level(chunks, nx, ny, nz, k) { set_level(chunks, nx, ny, nz, k, v); q.push_back((nx, ny, nz)); }
+                if v > level(store, nx, ny, nz, k) { set_level(store, nx, ny, nz, k, v); q.push_back((nx, ny, nz)); }
             }
         }
     }
