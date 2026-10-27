@@ -74,6 +74,7 @@ impl Generator {
         let (stone, dirt, grass, water, sand, bedrock, snow, sandstone) = (
             blk("minecraft:stone"), blk("minecraft:dirt"), blk("minecraft:grass_block"), blk("minecraft:water"),
             blk("minecraft:sand"), blk("minecraft:bedrock"), blk("minecraft:snow_block"), blk("minecraft:sandstone"));
+        let lava = blk("minecraft:lava");
         let log = BlockState { name: "minecraft:oak_log".into(), props: "axis=y".into() };
         let leaves = BlockState { name: "minecraft:oak_leaves".into(), props: "distance=1,persistent=false,waterlogged=false".into() };
 
@@ -108,7 +109,7 @@ impl Generator {
                     else if y >= h - 3 { filler }
                     else {
                         let cave = self.caves.sample(wx as f64 / 30.0, y as f64 / 20.0, wz as f64 / 30.0);
-                        if cave > 0.45 && y < h - 6 { continue } else { &stone }
+                        if cave > 0.45 && y < h - 6 { if y <= -54 { &lava } else { continue } } else { &stone }
                     };
                 c.set(lx, y, lz, blkref);
             }

@@ -7,6 +7,7 @@ pub fn opacity(name: &str) -> u8 {
     match name {
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:glass" | "minecraft:torch" => 0,
         "minecraft:water" | "minecraft:ice" => 2,
+        "minecraft:lava" => 1,
         n if n.ends_with("_leaves") => 1,
         _ => 15,
     }

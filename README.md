@@ -10,3 +10,6 @@ Rust voxel engine experiment with Java-edition save compatibility.
 - `world`: Java world folder load/save (level.dat, regions; preserves untouched chunks).
 - `light`: chunk-local sky/block light. `mesh`: face-culled meshing.
 - `cargo run --release --bin render [seed]` software-renders terrain to `render.ppm`.
+- `cargo run --release --features gpu --bin viewer [seed|java-world-dir] [--sdr] [--paper-white=NITS]`:
+  wgpu viewer (WASD/Space/Shift, click to grab mouse, Ctrl sprint). Native HDR: uses scRGB
+  (Rgba16Float) when available, else HDR10/PQ, else SDR. Emissive blocks (lava, glowstone) go above 1.0.

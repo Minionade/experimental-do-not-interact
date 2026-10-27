@@ -1,4 +1,5 @@
 //! Windowed wgpu viewer with free-fly camera and streamed chunks.
+//! HDR: auto-selects scRGB or HDR10/PQ output when the surface supports it; `--sdr` forces SDR.
 //! Controls: click to grab mouse, WASD move, Space/Shift up/down, Ctrl sprint, Esc release/quit.
 use blockengine::chunk::Chunk;
 use blockengine::mesh::{mesh_chunk, Mesh, Vertex};
@@ -24,10 +25,42 @@ struct GpuVertex { pos: [f32; 3], color: [f32; 3] }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms { view_proj: [[f32; 4]; 4], eye: [f32; 4] }
+struct Uniforms { view_proj: [[f32; 4]; 4], eye: [f32; 4], hdr: [f32; 4] }
+
+/// How the swapchain expects pixels. Chosen once at startup from the surface's capabilities.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Output {
+    /// sRGB surface; hardware applies the transfer function. Values above 1.0 clip.
+    Sdr,
+    /// Rgba16Float + extended linear sRGB (scRGB). 1.0 = SDR white, values above 1.0 are brighter than white.
+    ScRgb,
+    /// Rgb10a2Unorm + BT.2100 PQ (HDR10). Shader converts to BT.2020 and PQ-encodes absolute nits.
+    Pq,
+}
+
+impl Output {
+    fn mode(self) -> f32 { match self { Output::Sdr => 0.0, Output::ScRgb => 1.0, Output::Pq => 2.0 } }
+}
+
+fn pq_encode(nits: f32) -> f32 {
+    let y = (nits / 10000.0).max(0.0).powf(0.1593017578125);
+    ((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y)).powf(78.84375)
+}
+
+/// Mirrors the shader's output encoding, for the clear colour.
+fn encode_for_output(lin: [f64; 3], out: Output, paper_white: f32) -> [f64; 3] {
+    match out {
+        Output::Sdr | Output::ScRgb => lin,
+        Output::Pq => {
+            let (r, g, b) = (lin[0] as f32 * paper_white, lin[1] as f32 * paper_white, lin[2] as f32 * paper_white);
+            let c = [0.6274 * r + 0.3293 * g + 0.0433 * b, 0.0691 * r + 0.9195 * g + 0.0114 * b, 0.0164 * r + 0.0880 * g + 0.8956 * b];
+            [pq_encode(c[0]) as f64, pq_encode(c[1]) as f64, pq_encode(c[2]) as f64]
+        }
+    }
+}
 
 const SHADER: &str = r#"
-struct U { view_proj: mat4x4<f32>, eye: vec4<f32> };
+struct U { view_proj: mat4x4<f32>, eye: vec4<f32>, hdr: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32>, @location(1) d: f32 };
 @vertex fn vs(@location(0) pos: vec3<f32>, @location(1) c: vec3<f32>) -> VOut {
@@ -40,8 +73,21 @@ struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32>, @locat
 @fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
     let fog = clamp(i.d / (u.eye.w), 0.0, 1.0);
     let sky = vec3<f32>(0.6, 0.75, 0.95);
-    // Colours are authored in sRGB; the surface is sRGB, so hand it linear values.
-    return vec4<f32>(pow(mix(i.c, sky, fog * fog), vec3<f32>(2.2)), 1.0);
+    // Colours are authored in sRGB; decode to linear light. Emissive blocks exceed 1.0.
+    let lin = pow(mix(i.c, sky, fog * fog), vec3<f32>(2.2));
+    if (u.hdr.x < 1.5) {
+        // Sdr: sRGB surface encodes for us. scRGB: linear passthrough, >1.0 is HDR.
+        return vec4<f32>(lin, 1.0);
+    }
+    // PQ: linear (1.0 = paper white) -> nits -> BT.2020 -> ST 2084.
+    let nits = lin * u.hdr.y;
+    let rgb2020 = vec3<f32>(
+        dot(nits, vec3<f32>(0.6274, 0.3293, 0.0433)),
+        dot(nits, vec3<f32>(0.0691, 0.9195, 0.0114)),
+        dot(nits, vec3<f32>(0.0164, 0.0880, 0.8956)));
+    let y = pow(clamp(rgb2020 / 10000.0, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.1593017578125));
+    let pq = pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), vec3<f32>(78.84375));
+    return vec4<f32>(pq, 1.0);
 }
 "#;
 
@@ -72,7 +118,7 @@ struct ChunkGpu { vb: wgpu::Buffer, ib: wgpu::Buffer, n: u32 }
 struct Gfx {
     window: Arc<Window>, surface: wgpu::Surface<'static>, device: wgpu::Device, queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration, pipeline: wgpu::RenderPipeline, depth: wgpu::TextureView,
-    ubuf: wgpu::Buffer, bind: wgpu::BindGroup,
+    ubuf: wgpu::Buffer, bind: wgpu::BindGroup, output: Output,
 }
 
 struct Streamer {
@@ -97,6 +143,7 @@ struct App {
     chunks: HashMap<(i32, i32), ChunkGpu>,
     pos: [f32; 3], yaw: f32, pitch: f32,
     keys: HashSet<KeyCode>, grabbed: bool, last: Instant,
+    want_hdr: bool, paper_white: f32, output: Output,
 }
 
 impl App {
@@ -110,6 +157,19 @@ impl App {
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).unwrap();
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // Pick the best HDR output the surface offers: scRGB first (simplest, linear), then HDR10/PQ.
+        let caps = surface.get_capabilities(&adapter);
+        let mut output = Output::Sdr;
+        if self.want_hdr {
+            use wgpu::{SurfaceColorSpace as Cs, SurfaceColorSpaces as Css, TextureFormat as Tf};
+            if caps.color_spaces(Tf::Rgba16Float).contains(Css::EXTENDED_SRGB_LINEAR) {
+                config.format = Tf::Rgba16Float; config.color_space = Cs::ExtendedSrgbLinear; output = Output::ScRgb;
+            } else if caps.color_spaces(Tf::Rgb10a2Unorm).contains(Css::BT2100_PQ) {
+                config.format = Tf::Rgb10a2Unorm; config.color_space = Cs::Bt2100Pq; output = Output::Pq;
+            }
+        }
+        eprintln!("output: {:?} ({:?}, {:?}); display info: {:?}", output, config.format, config.color_space, surface.display_hdr_info(&adapter));
+        self.output = output;
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -141,7 +201,7 @@ impl App {
             multisample: Default::default(), multiview_mask: None, cache: None,
         });
         let depth = Self::depth_view(&device, &config);
-        self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind });
+        self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind, output });
     }
 
     fn depth_view(device: &wgpu::Device, c: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
@@ -207,7 +267,9 @@ impl App {
     fn render(&mut self) {
         let Some(g) = &self.gfx else { return };
         let aspect = g.config.width as f32 / g.config.height as f32;
-        let u = Uniforms { view_proj: view_proj(self.pos, self.forward(), aspect), eye: [self.pos[0], self.pos[1], self.pos[2], (RADIUS * 16) as f32] };
+        let u = Uniforms { view_proj: view_proj(self.pos, self.forward(), aspect), eye: [self.pos[0], self.pos[1], self.pos[2], (RADIUS * 16) as f32],
+            hdr: [g.output.mode(), self.paper_white, 0.0, 0.0] };
+        let sky = encode_for_output([0.6f64.powf(2.2), 0.75f64.powf(2.2), 0.95f64.powf(2.2)], g.output, self.paper_white);
         g.queue.write_buffer(&g.ubuf, 0, bytemuck::bytes_of(&u));
         let frame = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -220,7 +282,7 @@ impl App {
             let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.6f64.powf(2.2), g: 0.75f64.powf(2.2), b: 0.95f64.powf(2.2), a: 1.0 }), store: wgpu::StoreOp::Store } })],
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: sky[0], g: sky[1], b: sky[2], a: 1.0 }), store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &g.depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                 ..Default::default()
@@ -275,8 +337,11 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    // usage: viewer [seed | path/to/java/world]
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "1".into());
+    // usage: viewer [seed | path/to/java/world] [--sdr] [--paper-white=NITS]
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let want_hdr = !args.iter().any(|a| a == "--sdr");
+    let paper_white = args.iter().find_map(|a| a.strip_prefix("--paper-white=")?.parse().ok()).unwrap_or(203.0f32);
+    let arg = args.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "1".into());
     let path = std::path::Path::new(&arg);
     let (seed, world) = if path.join("level.dat").exists() {
         let seed = read_level_dat(path).ok().and_then(|l| level_seed(&l)).unwrap_or(0);
@@ -288,10 +353,23 @@ fn main() {
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         gfx: None, chunks: HashMap::new(), pos: [0.0, h + 20.0, 0.0], yaw: 0.0, pitch: -0.3,
-        keys: HashSet::new(), grabbed: false, last: Instant::now(),
+        keys: HashSet::new(), grabbed: false, last: Instant::now(), want_hdr, paper_white, output: Output::Sdr,
         st: Streamer { generator, saved: Arc::new(Mutex::new(world)), cache: Arc::default(), tx, rx, pending: HashSet::new() },
     };
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);
     el.run_app(&mut app).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pq_matches_st2084_reference_points() {
+        assert!(pq_encode(0.0) < 1e-5); // the ST 2084 formula bottoms out at ~7e-7, not exactly 0
+        assert!((pq_encode(10000.0) - 1.0).abs() < 1e-4);
+        // 100 nits ~ 0.508, 203 nits (HDR reference white) ~ 0.581 per BT.2408.
+        assert!((pq_encode(100.0) - 0.508).abs() < 1e-3);
+        assert!((pq_encode(203.0) - 0.581).abs() < 2e-3);
+    }
 }

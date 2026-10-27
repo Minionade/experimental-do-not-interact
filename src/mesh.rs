@@ -1,6 +1,6 @@
 //! Face-culled chunk meshing with per-face light and a fixed directional shade.
 use crate::chunk::{BlockState, Chunk, MIN_Y};
-use crate::light::opacity;
+use crate::light::{emission, opacity};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex { pub pos: [f32; 3], pub color: [f32; 3] }
@@ -17,6 +17,8 @@ pub fn block_color(name: &str) -> [f32; 3] {
         "minecraft:oak_log" => [102, 81, 50], "minecraft:oak_leaves" => [60, 120, 40],
         "minecraft:coal_ore" => [60, 60, 60], "minecraft:iron_ore" => [190, 150, 120],
         "minecraft:gold_ore" => [230, 200, 60], "minecraft:diamond_ore" => [90, 220, 220],
+        "minecraft:lava" => [255, 110, 20], "minecraft:glowstone" => [255, 200, 110],
+        "minecraft:sea_lantern" => [200, 230, 220], "minecraft:torch" => [255, 190, 80],
         _ => [200, 0, 200],
     };
     [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]
@@ -51,7 +53,9 @@ pub fn mesh_chunk(c: &Chunk, nb: [Option<&Chunk>; 4]) -> Mesh {
             let b = s.get(x, ly, z);
             if b.is_air() { continue; }
             let y = MIN_Y + (si * 16 + ly) as i32;
-            let is_water = b.name == "minecraft:water";
+            let is_water = matches!(b.name.as_str(), "minecraft:water" | "minecraft:lava");
+            // Emissive blocks ignore ambient light and exceed 1.0 so HDR outputs can show them brighter than white.
+            let glow = emission(&b.name) as f32 / 15.0 * 3.0;
             let col = block_color(&b.name);
             for (dir, shade, corners) in &FACES {
                 let (nx, ny, nz) = (x as i32 + dir[0], y + dir[1], z as i32 + dir[2]);
@@ -64,7 +68,7 @@ pub fn mesh_chunk(c: &Chunk, nb: [Option<&Chunk>; 4]) -> Mesh {
                     }
                     None => 15,
                 };
-                let f = shade * (0.15 + 0.85 * light as f32 / 15.0);
+                let f = if glow > 0.0 { glow * (0.85 + 0.15 * shade) } else { shade * (0.15 + 0.85 * light as f32 / 15.0) };
                 let base = m.vertices.len() as u32;
                 for k in corners {
                     m.vertices.push(Vertex {
