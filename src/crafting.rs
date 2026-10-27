@@ -90,6 +90,26 @@ fn parse_tag(packs: &PackStack, ns: &str, name: &str, out: &mut HashMap<String, 
 
 const WOODS: [&str; 6] = ["oak", "spruce", "birch", "jungle", "acacia", "dark_oak"];
 
+impl Recipe {
+    /// Display lines for the ingredients: (count, name), tags shown as "any <tag>". Order of first appearance.
+    pub fn ingredient_summary(&self) -> Vec<(u32, String)> {
+        fn label(i: &Ingredient) -> String {
+            match i {
+                Ingredient::Item(n) => n.strip_prefix("minecraft:").unwrap_or(n).to_string(),
+                Ingredient::Tag(t) => format!("any {}", t.rsplit(['/', ':']).next().unwrap_or(t)),
+                Ingredient::Any(a) => a.first().map_or_else(|| "?".into(), label),
+            }
+        }
+        let ings: Vec<&Ingredient> = match &self.pattern { Pattern::Shaped { cells, .. } => cells.iter().flatten().collect(), Pattern::Shapeless(v) => v.iter().collect() };
+        let mut out: Vec<(u32, String)> = Vec::new();
+        for i in ings {
+            let l = label(i);
+            match out.iter_mut().find(|e| e.1 == l) { Some(e) => e.0 += 1, None => out.push((1, l)) }
+        }
+        out
+    }
+}
+
 impl Recipes {
     /// Loads every crafting recipe from the packs; falls back to the built-in set if none are found.
     pub fn load(packs: &PackStack) -> Recipes {
@@ -234,6 +254,15 @@ mod tests {
         assert_eq!(out(&["iron_ingot", "iron_ingot", "", "iron_ingot", "stick", "", "", "stick", ""], 3, 3).unwrap().0, "minecraft:iron_axe");
         assert_eq!(out(&["", "iron_ingot", "iron_ingot", "", "stick", "iron_ingot", "", "stick", ""], 3, 3).unwrap().0, "minecraft:iron_axe");
         assert_eq!(out(&["cobblestone", "cobblestone", "cobblestone", "cobblestone", "", "cobblestone", "cobblestone", "cobblestone", "cobblestone"], 3, 3).unwrap().0, "minecraft:furnace");
+    }
+
+    #[test]
+    fn ingredient_summaries_count_and_name_tags() {
+        let r = Recipes::builtin();
+        let find = |id: &str| r.list.iter().find(|x| x.id == id).unwrap();
+        assert_eq!(find("minecraft:stone_pickaxe").ingredient_summary(), vec![(3, "cobblestone".to_string()), (2, "stick".to_string())]);
+        assert_eq!(find("minecraft:stick").ingredient_summary(), vec![(2, "any planks".to_string())]);
+        assert_eq!(find("minecraft:oak_planks").ingredient_summary(), vec![(1, "oak_log".to_string())]);
     }
 
     #[test]

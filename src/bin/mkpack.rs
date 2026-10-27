@@ -137,6 +137,37 @@ fn main() {
     fluid("lava_still", [255.0, 120.0, 20.0], 1.0);
     write(&tex.join("lava_still.png.mcmeta"), r#"{"animation":{"frametime":4,"interpolate":true}}"#);
 
+    // Block-break crack stages: speckle that grows with the stage, on a transparent tile.
+    for stage in 0..10u32 {
+        let px: Vec<u8> = (0..256u32).flat_map(|i| {
+            let (x, y) = (i % 16, i / 16);
+            if hash(x / 2, y / 2, 55) % 10 < stage { [20, 20, 20, 235] } else { [0, 0, 0, 0] }
+        }).collect();
+        png(&tex.join(format!("destroy_stage_{stage}.png")), 16, 16, &px);
+    }
+
+    // Item icons: sticks, coal, and five tiers of five tools drawn from a diagonal handle plus a head.
+    let items = out.join("assets/minecraft/textures/item");
+    let draw = |set: &dyn Fn(i32, i32) -> Option<[u8; 4]>| -> Vec<u8> {
+        (0..256i32).flat_map(|i| set(i % 16, i / 16).unwrap_or([0, 0, 0, 0])).collect()
+    };
+    let handle = |x: i32, y: i32| (x + y == 15 && (3..=13).contains(&x)).then_some([130, 95, 50, 255]);
+    png(&items.join("stick.png"), 16, 16, &draw(&|x, y| handle(x, y)));
+    png(&items.join("coal.png"), 16, 16, &draw(&|x, y| ((x - 8).pow(2) + (y - 8).pow(2) < 26).then_some([35 + (hash(x as u32, y as u32, 3) % 25) as u8, 35, 38, 255])));
+    for (tier, c) in [("wooden", [160, 125, 70]), ("stone", [125, 125, 128]), ("iron", [215, 215, 220]), ("golden", [250, 215, 60]), ("diamond", [90, 235, 235])] {
+        let head = [c[0], c[1], c[2], 255];
+        let kinds: [(&str, Box<dyn Fn(i32, i32) -> bool>); 5] = [
+            ("pickaxe", Box::new(|x, y| (y == 3 && (3..=12).contains(&x)) || (y == 4 && (x == 3 || x == 12)) || (y == 5 && (x == 2 || x == 13)))),
+            ("axe", Box::new(|x, y| (2..=5).contains(&y) && (6..=11).contains(&x) && x - 6 <= 5 - y + 2)),
+            ("shovel", Box::new(|x, y| (2..=4).contains(&y) && (11..=13).contains(&x))),
+            ("hoe", Box::new(|x, y| (y == 3 && (5..=11).contains(&x)) || (y == 4 && x == 5))),
+            ("sword", Box::new(|x, y| x + y == 15 && (5..=12).contains(&x) || (x + y == 14 && (6..=12).contains(&x)))),
+        ];
+        for (kind, is_head) in kinds {
+            png(&items.join(format!("{tier}_{kind}.png")), 16, 16, &draw(&|x, y| if is_head(x, y) { Some(head) } else { handle(x, y) }));
+        }
+    }
+
     // Biome colormaps (the documented 256x256 triangle lookup): cold = bluish green, hot/dry = yellowish.
     for (name, cold, hot) in [("grass", [110.0, 190.0, 110.0], [190.0, 180.0, 70.0]), ("foliage", [70.0, 140.0, 90.0], [160.0, 160.0, 40.0])] {
         let px: Vec<u8> = (0..256u32 * 256).flat_map(|i| {

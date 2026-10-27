@@ -3,9 +3,12 @@
 //! Controls: click to grab mouse; WASD move, Space jump, Shift sneak, Ctrl sprint, F fly (Space up / Shift down),
 //! left click break, right click place, 1-9 or wheel select block, F5 save, T skip 6000 ticks of time, Esc release/quit.
 use blockengine::access::SharedChunkMap;
-use blockengine::chunk::{BlockState, Chunk};
-use blockengine::game::{Game, Input};
-use blockengine::mesh::{entity_model, mesh_chunk_grid, outline_mesh, Mesh, Vertex};
+use blockengine::chunk::Chunk;
+use blockengine::crafting::Recipes;
+use blockengine::font;
+use blockengine::game::{Game, GameMode, Input, MAX_AIR};
+use blockengine::item::{ItemStack, HOTBAR as HOTBAR_SLOTS};
+use blockengine::mesh::{block_color, entity_model, mesh_chunk_grid, outline_mesh, overlay_mesh, Mesh, Vertex};
 use blockengine::sky::{rotate_star, sky_at, stars};
 use blockengine::model::Models;
 use blockengine::pack::{Pack, PackStack};
@@ -163,6 +166,7 @@ fn view_proj(eye: [f32; 3], fwd: [f32; 3], aspect: f32) -> M4 {
 struct ChunkGpu { vb: wgpu::Buffer, ib: wgpu::Buffer, n: u32, ib_t: Option<wgpu::Buffer>, n_t: u32 }
 
 const SKY_STARS: usize = 300;
+const HUD_VERTS: usize = 1 << 16;
 
 struct Gfx {
     window: Arc<Window>, surface: wgpu::Surface<'static>, device: wgpu::Device, queue: wgpu::Queue,
@@ -170,6 +174,7 @@ struct Gfx {
     ubuf: wgpu::Buffer, bind: wgpu::BindGroup, ubuf_ui: wgpu::Buffer, bind_ui: wgpu::BindGroup, output: Output,
     atlas_tex: wgpu::Texture, atlas_bind: wgpu::BindGroup,
     pipeline_t: wgpu::RenderPipeline, ubuf_sky: wgpu::Buffer, bind_sky: wgpu::BindGroup, sky_vb: wgpu::Buffer, sky_ib: wgpu::Buffer,
+    ovl_vb: wgpu::Buffer, ovl_ib: wgpu::Buffer, hud_vb: wgpu::Buffer, hud_ib: wgpu::Buffer,
     dyn_vb: wgpu::Buffer, dyn_ib: wgpu::Buffer, ui_vb: wgpu::Buffer, ui_ib: wgpu::Buffer,
 }
 
@@ -181,7 +186,8 @@ enum Msg {
 /// Where chunks come from and where edits go.
 struct Source { read: Arc<Mutex<World>>, save_dir: Option<PathBuf> }
 
-const HOTBAR: [(&str, &str, &str, u8); 9] = [
+/// Creative-mode hotbar contents (name, block id, props, is_fluid).
+const CREATIVE_HOTBAR: [(&str, &str, &str, u8); 9] = [
     ("Stone", "minecraft:stone", "", 0), ("Dirt", "minecraft:dirt", "", 0), ("Grass Block", "minecraft:grass_block", "", 0),
     ("Oak Log", "minecraft:oak_log", "axis=y", 0), ("Oak Leaves", "minecraft:oak_leaves", "distance=1,persistent=true,waterlogged=false", 0),
     ("Sand", "minecraft:sand", "", 0), ("Glowstone", "minecraft:glowstone", "", 0),
@@ -203,10 +209,161 @@ struct App {
     keys: HashSet<KeyCode>, grabbed: bool, last: Instant,
     want_hdr: bool, paper_white: f32, output: Output,
     models: Arc<Models>, textured: bool, anim_state: Vec<u64>, t0: Instant,
-    selected: usize, mouse_left: bool, mouse_right: bool, click_left: bool, click_right: bool, act_cd: f32, title_t: f32,
+    recipes: Arc<Recipes>, screen_open: bool, craft_sel: usize, fps: f32, name_t: f32, last_sel: usize,
+    mouse_left: bool, mouse_right: bool, left_hold: f32, click_right: bool, act_cd: f32, title_t: f32,
+}
+
+/// "minecraft:oak_planks" -> "oak planks"
+fn pretty(name: &str) -> String { name.strip_prefix("minecraft:").unwrap_or(name).replace('_', " ") }
+
+/// Immediate-mode HUD geometry in pixel coordinates (origin top-left), emitted as NDC quads.
+struct Hud { v: Vec<GpuVertex>, i: Vec<u32>, w: f32, h: f32, white: [f32; 2] }
+
+impl Hud {
+    fn new(w: f32, h: f32, white: [f32; 2]) -> Self { Self { v: Vec::new(), i: Vec::new(), w, h, white } }
+    fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: (f32, f32, f32, f32), color: [f32; 3], alpha: f32) {
+        if self.v.len() + 4 > HUD_VERTS { return; }
+        let ndc = |px: f32, py: f32| [px / self.w * 2.0 - 1.0, 1.0 - py / self.h * 2.0, 0.0];
+        let base = self.v.len() as u32;
+        // BL, BR, TR, TL: counter-clockwise in NDC.
+        for (px, py, u, vv) in [(x, y + h, uv.0, uv.3), (x + w, y + h, uv.2, uv.3), (x + w, y, uv.2, uv.1), (x, y, uv.0, uv.1)] {
+            self.v.push(GpuVertex { pos: ndc(px, py), color, uv: [u, vv], light: [1.0, 1.0], alpha });
+        }
+        self.i.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3], alpha: f32) {
+        let u = self.white;
+        self.quad(x, y, w, h, (u[0], u[1], u[0], u[1]), color, alpha);
+    }
+    /// Text with a one-pixel drop shadow. `px` is the on-screen size of one glyph pixel.
+    fn text(&mut self, x: f32, y: f32, px: f32, color: [f32; 3], s: &str) {
+        let pixels = font::text_pixels(s);
+        for (dx, dy, c) in [(px, px, [color[0] * 0.2, color[1] * 0.2, color[2] * 0.2]), (0.0, 0.0, color)] {
+            for &(gx, gy) in &pixels { self.rect(x + dx + gx as f32 * px, y + dy + gy as f32 * px, px, px, c, 1.0); }
+        }
+    }
+    fn text_centered(&mut self, cx: f32, y: f32, px: f32, color: [f32; 3], s: &str) {
+        self.text(cx - font::text_width(s) as f32 * px / 2.0, y, px, color, s);
+    }
 }
 
 impl App {
+    /// Draws an item's icon: its pack texture if it has one, otherwise a coloured square with its initial.
+    fn icon(&self, hud: &mut Hud, name: &str, x: f32, y: f32, size: f32) {
+        if let Some(r) = self.models.item_icon(name) { hud.quad(x, y, size, size, r, [1.0; 3], 1.0); return; }
+        let c = block_color(name);
+        hud.rect(x, y, size, size, [c[0] * 0.55, c[1] * 0.55, c[2] * 0.55], 1.0);
+        hud.rect(x + size * 0.08, y + size * 0.08, size * 0.84, size * 0.84, c, 1.0);
+        let letter: String = pretty(name).chars().next().into_iter().collect();
+        let px = (size / 10.0).max(1.0);
+        hud.text(x + size / 2.0 - 2.5 * px, y + size / 2.0 - 3.5 * px, px, [1.0, 1.0, 1.0], &letter);
+    }
+
+    fn slot(&self, hud: &mut Hud, stack: Option<&ItemStack>, x: f32, y: f32, gui: f32, selected: bool) {
+        let s = 20.0 * gui;
+        if selected { hud.rect(x - gui, y - gui, s + 2.0 * gui, s + 2.0 * gui, [1.0, 1.0, 1.0], 0.95); }
+        // Slots sit inside their cell with a one-pixel gutter so a grid reads as separate squares.
+        hud.rect(x + 0.5 * gui, y + 0.5 * gui, s - gui, s - gui, [0.16, 0.16, 0.16], 0.8);
+        if let Some(st) = stack {
+            self.icon(hud, &st.name, x + 2.0 * gui, y + 2.0 * gui, 16.0 * gui);
+            if st.count > 1 {
+                let t = st.count.to_string();
+                let px = gui;
+                hud.text(x + s - font::text_width(&t) as f32 * px - gui, y + s - 8.0 * px, px, [1.0, 1.0, 1.0], &t);
+            }
+        }
+    }
+
+    fn build_hud(&self, w: f32, h: f32) -> Hud {
+        let mut hud = Hud::new(w, h, self.models.atlas.white_uv());
+        let gui = (w / 320.0).min(h / 240.0).floor().max(1.0);
+        let slot = 20.0 * gui;
+        let (bx, by) = ((w - HOTBAR_SLOTS as f32 * slot) / 2.0, h - slot - 2.0 * gui);
+        let inv = &self.game.inventory;
+
+        // Hotbar.
+        hud.rect(bx - 2.0 * gui, by - 2.0 * gui, HOTBAR_SLOTS as f32 * slot + 4.0 * gui, slot + 4.0 * gui, [0.0, 0.0, 0.0], 0.45);
+        for i in 0..HOTBAR_SLOTS { self.slot(&mut hud, inv.slots[i].as_ref(), bx + i as f32 * slot, by, gui, i == inv.selected); }
+
+        if self.name_t > 0.0 {
+            if let Some(st) = inv.selected_stack() {
+                let ny = by - (if self.game.mode == GameMode::Survival { 36.0 } else { 16.0 }) * gui;
+                hud.text_centered(w / 2.0, ny, gui, [1.0, 1.0, 1.0], &pretty(&st.name));
+            }
+        }
+
+        // Hearts and breath (survival only).
+        if self.game.mode == GameMode::Survival {
+            let hy = by - 12.0 * gui;
+            for k in 0..10 {
+                let hp = self.game.health - 2.0 * k as f32;
+                let (hx, flash) = (bx + k as f32 * 8.0 * gui, self.game.since_damage < 10 && self.game.since_damage % 4 < 2);
+                for (row, bits) in font::HEART.iter().enumerate() {
+                    for col in 0..9 {
+                        if bits & (1 << (8 - col)) == 0 { continue; }
+                        let full = hp >= 2.0 || (hp >= 1.0 && col < 5);
+                        let c = if flash { [1.0, 0.8, 0.8] } else if full { [0.9, 0.12, 0.12] } else { [0.22, 0.05, 0.05] };
+                        hud.rect(hx + col as f32 * gui * 0.85, hy + row as f32 * gui * 0.85, gui * 0.85, gui * 0.85, c, 1.0);
+                    }
+                }
+            }
+            if self.game.air < MAX_AIR {
+                let n = (self.game.air as f32 / 30.0).ceil() as i32;
+                for k in 0..n.min(10) {
+                    let (x, y) = (bx + HOTBAR_SLOTS as f32 * slot - (k + 1) as f32 * 8.0 * gui, hy - 10.0 * gui);
+                    hud.rect(x, y, 7.0 * gui, 7.0 * gui, [0.35, 0.6, 0.95], 1.0);
+                    hud.rect(x + 2.0 * gui, y + 2.0 * gui, 2.0 * gui, 2.0 * gui, [0.85, 0.95, 1.0], 1.0);
+                }
+            }
+            if self.game.since_damage < 10 {
+                hud.rect(0.0, 0.0, w, h, [0.85, 0.0, 0.0], 0.35 * (1.0 - self.game.since_damage as f32 / 10.0));
+            }
+        }
+
+        // Debug text.
+        let p = self.game.player_pos();
+        let clock = (self.game.time % 24000) as f64 / 1000.0 + 6.0;
+        let lines = [format!("XYZ {:.1} {:.1} {:.1}", p[0], p[1], p[2]), format!("{:?} {:02}:{:02}", self.game.mode, (clock as u32) % 24, (clock.fract() * 60.0) as u32),
+            format!("FPS {:.0}", self.fps)];
+        for (i, l) in lines.iter().enumerate() { hud.text(4.0 * gui, (4.0 + i as f32 * 9.0) * gui, gui, [1.0, 1.0, 1.0], l); }
+
+        if self.screen_open { self.build_inventory_screen(&mut hud, gui); }
+        hud
+    }
+
+    fn build_inventory_screen(&self, hud: &mut Hud, gui: f32) {
+        let (w, h) = (hud.w, hud.h);
+        let slot = 20.0 * gui;
+        hud.rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0], 0.55);
+        let (gx, gy) = ((w * 0.05).max(8.0 * gui), (h * 0.18).max(20.0 * gui));
+        hud.text(gx, gy - 12.0 * gui, gui * 1.2, [1.0, 1.0, 1.0], "INVENTORY");
+        let inv = &self.game.inventory;
+        for row in 0..3 { for col in 0..9 {
+            self.slot(hud, inv.slots[9 + row * 9 + col].as_ref(), gx + col as f32 * slot, gy + row as f32 * slot, gui, false);
+        }}
+        for col in 0..HOTBAR_SLOTS { self.slot(hud, inv.slots[col].as_ref(), gx + col as f32 * slot, gy + 3.0 * slot + 6.0 * gui, gui, col == inv.selected); }
+
+        // Crafting list: everything the inventory can pay for right now.
+        let cx = gx + 9.0 * slot + 16.0 * gui;
+        let craftable = self.recipes.craftable(inv);
+        hud.text(cx, gy - 12.0 * gui, gui * 1.2, [1.0, 1.0, 1.0], &format!("CRAFTING ({})", craftable.len()));
+        let row_h = 22.0 * gui;
+        let visible = (((h - gy - 20.0 * gui) / row_h).floor() as usize).clamp(1, 12);
+        let sel = self.craft_sel.min(craftable.len().saturating_sub(1));
+        let scroll = sel.saturating_sub(visible - 1);
+        if craftable.is_empty() { hud.text(cx, gy, gui, [0.75, 0.75, 0.75], "NOTHING TO CRAFT YET"); }
+        for (n, rec) in craftable.iter().enumerate().skip(scroll).take(visible) {
+            let y = gy + (n - scroll) as f32 * row_h;
+            if n == sel { hud.rect(cx - 2.0 * gui, y - 1.0 * gui, w - cx - 8.0 * gui, row_h - 2.0 * gui, [0.35, 0.55, 0.95], 0.6); }
+            self.icon(hud, &rec.result.name, cx, y, 16.0 * gui);
+            let title = format!("{}X {}", rec.result.count, pretty(&rec.result.name));
+            hud.text(cx + 20.0 * gui, y, gui, [1.0, 1.0, 1.0], &title);
+            let needs = rec.ingredient_summary().iter().map(|(c, n)| format!("{c} {}", n.replace('_', " "))).collect::<Vec<_>>().join(", ");
+            hud.text(cx + 20.0 * gui, y + 9.0 * gui, gui * 0.6, [0.8, 0.8, 0.8], &needs);
+        }
+        hud.text(gx, gy + 4.0 * slot + 14.0 * gui, gui * 0.8, [0.85, 0.85, 0.85], "UP/DOWN SELECT   ENTER CRAFT   Q DROP   E OR ESC CLOSE");
+    }
+
     fn init_gfx(&mut self, el: &ActiveEventLoop) {
         let window = Arc::new(el.create_window(Window::default_attributes().with_title("blockengine")).unwrap());
         let instance = wgpu::Instance::default();
@@ -294,9 +451,12 @@ impl App {
         let iu = wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST;
         let (dyn_vb, dyn_ib) = (mk_buf((DYN_VERTS * 44) as u64, vu), mk_buf((DYN_VERTS * 6 * 4) as u64, iu));
         let (sky_vb, sky_ib) = (mk_buf((44 * 4 * (SKY_STARS + 2)) as u64, vu), mk_buf((4 * 6 * (SKY_STARS + 2)) as u64, iu));
+        let (ovl_vb, ovl_ib) = (mk_buf(44 * 64, vu), mk_buf(4 * 64, iu));
+        let (hud_vb, hud_ib) = (mk_buf((44 * HUD_VERTS) as u64, vu), mk_buf((HUD_VERTS * 6 / 4 * 4) as u64, iu));
         let (ui_vb, ui_ib) = (mk_buf(44 * 16, vu), mk_buf(4 * 16, iu));
         self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind, ubuf_ui, bind_ui, output, atlas_tex, atlas_bind,
             pipeline_t, ubuf_sky, bind_sky, sky_vb, sky_ib,
+            ovl_vb, ovl_ib, hud_vb, hud_ib,
             dyn_vb, dyn_ib, ui_vb, ui_ib });
     }
 
@@ -328,30 +488,32 @@ impl App {
         let dt = (now - self.last).as_secs_f32().min(0.25);
         self.last = now;
 
-        // Input -> player.
-        let input = Input { forward: self.key(KeyCode::KeyW), back: self.key(KeyCode::KeyS), left: self.key(KeyCode::KeyA),
+        self.fps = self.fps * 0.9 + (1.0 / dt.max(1e-4)) * 0.1;
+        if self.game.inventory.selected != self.last_sel { self.last_sel = self.game.inventory.selected; self.name_t = 2.0; }
+        self.name_t = (self.name_t - dt).max(0.0);
+
+        // Input -> player. Menus swallow movement and clicks.
+        let menu = self.screen_open;
+        let input = if menu { Input::default() } else { Input { forward: self.key(KeyCode::KeyW), back: self.key(KeyCode::KeyS), left: self.key(KeyCode::KeyA),
             right: self.key(KeyCode::KeyD), jump: self.key(KeyCode::Space), sneak: self.key(KeyCode::ShiftLeft),
-            sprint: self.key(KeyCode::ControlLeft) };
+            sprint: self.key(KeyCode::ControlLeft) } };
         self.game.set_input(input, self.yaw as f64);
+
+        // Mining: hold the left button on a block. A click shorter than a frame still holds for a moment so a tick sees it.
+        let f = self.forward();
+        let target = self.game.target([f[0] as f64, f[1] as f64, f[2] as f64]);
+        self.left_hold = (self.left_hold - dt).max(0.0);
+        let holding = self.grabbed && !menu && (self.mouse_left || self.left_hold > 0.0);
+        self.game.set_mining(if holding { target.map(|h| h.pos) } else { None });
         self.game.update(dt as f64);
 
-        // Block interaction (rate limited like holding a mouse button in creative).
+        // Placing: right click, rate limited while held.
         self.act_cd -= dt;
-        // A click that was pressed and released within one frame still counts once.
-        let (left, right) = (self.mouse_left || self.click_left, self.mouse_right || self.click_right);
-        let fresh = self.click_left || self.click_right;
-        self.click_left = false; self.click_right = false;
-        if self.grabbed && (self.act_cd <= 0.0 || fresh) && (left || right) {
-            let f = self.forward();
-            if let Some(hit) = self.game.target([f[0] as f64, f[1] as f64, f[2] as f64]) {
-                if left { self.game.break_block(hit.pos); }
-                else {
-                    let at = [hit.pos[0] + hit.normal[0], hit.pos[1] + hit.normal[1], hit.pos[2] + hit.normal[2]];
-                    let (_, name, props, _) = HOTBAR[self.selected];
-                    let b = if HOTBAR[self.selected].3 == 1 { BlockState::fluid(name, 0) } else { BlockState { name: name.into(), props: props.into() } };
-                    self.game.place_block(at, &b);
-                }
-                self.act_cd = 0.18;
+        let fresh = std::mem::take(&mut self.click_right);
+        if self.grabbed && !menu && (self.mouse_right || fresh) && (self.act_cd <= 0.0 || fresh) {
+            if let Some(hit) = target {
+                let at = [hit.pos[0] + hit.normal[0], hit.pos[1] + hit.normal[1], hit.pos[2] + hit.normal[2]];
+                if self.game.place_from_inventory(at) { self.act_cd = 0.2; }
             }
         }
 
@@ -362,8 +524,9 @@ impl App {
                 let p = self.game.player_pos();
                 // Tick 0 is sunrise = 06:00 on the in-game clock.
                 let clock = (self.game.time % 24000) as f64 / 1000.0 + 6.0;
-                g.window.set_title(&format!("blockengine | {} [{}] | {:.0} {:.0} {:.0} | {:02}:{:02} | {} chunks",
-                    HOTBAR[self.selected].0, self.selected + 1, p[0], p[1], p[2], (clock as u32) % 24, ((clock.fract()) * 60.0) as u32, self.chunks.len()));
+                let held = self.game.inventory.selected_stack().map_or("empty hand".to_string(), |s| pretty(&s.name));
+                g.window.set_title(&format!("blockengine | {:?} | {} | {:.0} {:.0} {:.0} | {:02}:{:02} | {} chunks",
+                    self.game.mode, held, p[0], p[1], p[2], (clock as u32) % 24, ((clock.fract()) * 60.0) as u32, self.chunks.len()));
             }
         }
         self.animate_textures();
@@ -553,6 +716,20 @@ impl App {
         g.queue.write_buffer(&g.ui_vb, 0, bytemuck::cast_slice(&ui));
         g.queue.write_buffer(&g.ui_ib, 0, bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]));
 
+        // Crack overlay on the block being mined.
+        let mut ovl_n = 0u32;
+        if let Some((pos, p)) = self.game.mining_progress() {
+            let id = format!("block/destroy_stage_{}", ((p * 10.0) as usize).min(9));
+            let m = if self.models.atlas.contains(&id) { overlay_mesh(pos, Some(self.models.atlas.rect(&id)), 1.0) } else { overlay_mesh(pos, None, p * 0.55) };
+            let verts: Vec<GpuVertex> = m.vertices.iter().map(|v| gv(v, [0.0; 3])).collect();
+            g.queue.write_buffer(&g.ovl_vb, 0, bytemuck::cast_slice(&verts));
+            g.queue.write_buffer(&g.ovl_ib, 0, bytemuck::cast_slice(&m.translucent));
+            ovl_n = m.translucent.len() as u32;
+        }
+        let hud = self.build_hud(g.config.width as f32, g.config.height as f32);
+        g.queue.write_buffer(&g.hud_vb, 0, bytemuck::cast_slice(&hud.v));
+        g.queue.write_buffer(&g.hud_ib, 0, bytemuck::cast_slice(&hud.i));
+
         let clear = encode_for_output([(sky.color[0] as f64).powf(2.2), (sky.color[1] as f64).powf(2.2), (sky.color[2] as f64).powf(2.2)], g.output, self.paper_white);
         let frame = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -601,12 +778,23 @@ impl App {
                 p.set_index_buffer(c.ib_t.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
                 p.draw_indexed(0..c.n_t, 0, 0..1);
             }
-            // 4. Crosshair.
+            if ovl_n > 0 {
+                p.set_vertex_buffer(0, g.ovl_vb.slice(..));
+                p.set_index_buffer(g.ovl_ib.slice(..), wgpu::IndexFormat::Uint32);
+                p.draw_indexed(0..ovl_n, 0, 0..1);
+            }
+            // 4. Crosshair, then the HUD (alpha-blended, screen space).
             p.set_pipeline(&g.pipeline);
             p.set_bind_group(0, &g.bind_ui, &[]);
             p.set_vertex_buffer(0, g.ui_vb.slice(..));
             p.set_index_buffer(g.ui_ib.slice(..), wgpu::IndexFormat::Uint32);
             p.draw_indexed(0..12, 0, 0..1);
+            if !hud.i.is_empty() {
+                p.set_pipeline(&g.pipeline_t);
+                p.set_vertex_buffer(0, g.hud_vb.slice(..));
+                p.set_index_buffer(g.hud_ib.slice(..), wgpu::IndexFormat::Uint32);
+                p.draw_indexed(0..hud.i.len() as u32, 0, 0..1);
+            }
         }
         g.queue.submit([enc.finish()]);
         g.window.pre_present_notify();
@@ -633,7 +821,7 @@ impl ApplicationHandler for App {
                     }
                 } else {
                     match button {
-                        MouseButton::Left => { self.mouse_left = down; if down { self.click_left = true; } }
+                        MouseButton::Left => { self.mouse_left = down; if down { self.left_hold = 0.12; } }
                         MouseButton::Right => { self.mouse_right = down; if down { self.click_right = true; } }
                         _ => {}
                     }
@@ -641,29 +829,46 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 30.0 };
-                if dy != 0.0 { self.selected = (self.selected as i32 - dy.signum() as i32).rem_euclid(9) as usize; }
+                if dy != 0.0 && !self.screen_open { let inv = &mut self.game.inventory; inv.selected = (inv.selected as i32 - dy.signum() as i32).rem_euclid(9) as usize; }
             }
             WindowEvent::KeyboardInput { event, .. } => if let PhysicalKey::Code(k) = event.physical_key {
-                if event.state == ElementState::Pressed && !event.repeat {
+                let pressed = event.state == ElementState::Pressed;
+                // Menu navigation repeats while held.
+                if pressed && self.screen_open {
+                    match k {
+                        KeyCode::ArrowUp => self.craft_sel = self.craft_sel.saturating_sub(1),
+                        KeyCode::ArrowDown => self.craft_sel += 1,
+                        KeyCode::Enter | KeyCode::NumpadEnter => {
+                            let recipes = self.recipes.clone();
+                            let pick = recipes.craftable(&self.game.inventory).get(self.craft_sel).map(|r| (*r).clone());
+                            if let Some(r) = pick { recipes.craft(&r, &mut self.game.inventory); }
+                        }
+                        _ => {}
+                    }
+                }
+                if pressed && !event.repeat {
                     match k {
                         KeyCode::Escape => {
-                            if self.grabbed {
+                            if self.screen_open { self.screen_open = false; }
+                            else if self.grabbed {
                                 if let Some(g) = &self.gfx { let _ = g.window.set_cursor_grab(CursorGrabMode::None); g.window.set_cursor_visible(true); }
                                 self.grabbed = false; self.mouse_left = false; self.mouse_right = false;
                             } else { self.save(); el.exit(); }
                         }
+                        KeyCode::KeyE => { self.screen_open = !self.screen_open; self.craft_sel = 0; }
+                        KeyCode::KeyQ => { let whole = self.key(KeyCode::ControlLeft); self.game.drop_selected(whole, self.yaw as f64); }
                         KeyCode::KeyF => self.game.toggle_flying(),
-                        KeyCode::KeyT => self.game.time += 6000, // skip a quarter day
                         KeyCode::F5 => self.save(),
+                        KeyCode::KeyT => self.game.time += 6000, // skip a quarter day
                         KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5
                         | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 => {
-                            self.selected = match k { KeyCode::Digit1 => 0, KeyCode::Digit2 => 1, KeyCode::Digit3 => 2, KeyCode::Digit4 => 3,
+                            self.game.inventory.selected = match k { KeyCode::Digit1 => 0, KeyCode::Digit2 => 1, KeyCode::Digit3 => 2, KeyCode::Digit4 => 3,
                                 KeyCode::Digit5 => 4, KeyCode::Digit6 => 5, KeyCode::Digit7 => 6, KeyCode::Digit8 => 7, _ => 8 };
                         }
                         _ => {}
                     }
                 }
-                if event.state == ElementState::Pressed { self.keys.insert(k); } else { self.keys.remove(&k); }
+                if pressed { self.keys.insert(k); } else { self.keys.remove(&k); }
             },
             WindowEvent::RedrawRequested => { self.update(); self.render(); if let Some(g) = &self.gfx { g.window.request_redraw(); } }
             _ => {}
@@ -691,6 +896,7 @@ fn main() {
         }
     }
     let textured = !packs.is_empty();
+    let recipes = Recipes::load(&packs); // recipes come from the same packs (a vanilla jar ships them); built-ins otherwise
     let models = Arc::new(Models::new(packs));
     if textured { eprintln!("atlas {}x{} (tile {}px), {} animated textures", models.atlas.width, models.atlas.height, models.atlas.tile, models.atlas.animations.len()); }
     let paper_white = args.iter().find_map(|a| a.strip_prefix("--paper-white=")?.parse().ok()).unwrap_or(203.0f32);
@@ -709,6 +915,18 @@ fn main() {
     };
     let (tx, rx) = mpsc::channel();
     let mut game = Game::new(seed);
+    let creative = args.iter().any(|a| a == "--creative");
+    if creative {
+        game.mode = GameMode::Creative;
+        for (i, (_, name, _, _)) in CREATIVE_HOTBAR.iter().enumerate() {
+            game.inventory.slots[i] = Some(ItemStack::new(name, 64));
+        }
+    } else if args.iter().any(|a| a == "--kit") {
+        // Starter kit for trying survival without punching trees first.
+        for (n, c) in [("wooden_pickaxe", 1), ("wooden_axe", 1), ("wooden_shovel", 1), ("oak_log", 8), ("cobblestone", 16), ("coal", 4), ("stick", 8), ("torch", 8)] {
+            game.inventory.add(&ItemStack::new(n, c));
+        }
+    }
     // A few pigs around spawn; they freeze until their chunk loads, then drop onto the terrain.
     for i in 0..6 {
         let (x, z) = (4 + i * 3, -6 + (i * 5) % 11);
@@ -716,11 +934,12 @@ fn main() {
         game.entities.spawn(blockengine::entity::Kind::Pig, [x as f64 + 0.5, h as f64 + 2.0, z as f64 + 0.5]);
     }
     let mut app = App {
-        gfx: None, game, src: Source { read: Arc::new(Mutex::new(World::open(read_dir))), save_dir },
+        recipes: Arc::new(recipes), gfx: None, game, src: Source { read: Arc::new(Mutex::new(World::open(read_dir))), save_dir },
         tx, rx, pending_gen: HashSet::new(), mesh_seq: HashMap::new(), next_seq: 0, in_flight_meshes: 0, chunks: HashMap::new(),
         yaw: 0.0, pitch: -0.3, keys: HashSet::new(), grabbed: false, last: Instant::now(),
         want_hdr, paper_white, output: Output::Sdr, models, textured, anim_state: Vec::new(), t0: Instant::now(),
-        selected: 0, mouse_left: false, mouse_right: false, click_left: false, click_right: false, act_cd: 0.0, title_t: 0.0,
+        screen_open: false, craft_sel: 0, fps: 60.0, name_t: 0.0, last_sel: 0,
+        mouse_left: false, mouse_right: false, left_hold: 0.0, click_right: false, act_cd: 0.0, title_t: 0.0,
     };
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);

@@ -314,6 +314,26 @@ pub fn entity_model(e: &Entity) -> Mesh {
     out
 }
 
+/// Crack overlay for the block being mined: a slightly enlarged cube, textured with a destroy stage when `uv` is given.
+pub fn overlay_mesh(pos: [i32; 3], uv: Option<(f32, f32, f32, f32)>, alpha: f32) -> Mesh {
+    let o = 0.002f32;
+    let lo = [pos[0] as f32 - o, pos[1] as f32 - o, pos[2] as f32 - o];
+    let hi = [pos[0] as f32 + 1.0 + o, pos[1] as f32 + 1.0 + o, pos[2] as f32 + 1.0 + o];
+    let mut m = box_mesh(lo, hi, if uv.is_some() { [1.0; 3] } else { [0.0; 3] });
+    for (i, v) in m.vertices.iter_mut().enumerate() {
+        v.alpha = alpha;
+        v.light = [1.0, 1.0];
+        if let Some((u0, v0, u1, v1)) = uv {
+            // box_mesh corners are CCW per face; map them onto the full tile.
+            let (cu, cv) = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)][i % 4];
+            v.uv = [u0 + (u1 - u0) * cu * 0.999, v0 + (v1 - v0) * cv * 0.999];
+        }
+    }
+    // The overlay is drawn in the translucent pass.
+    m.translucent = std::mem::take(&mut m.indices);
+    m
+}
+
 /// Wireframe-style outline around a block (12 thin boxes), for block selection.
 pub fn outline_mesh(pos: [i32; 3]) -> Mesh {
     let (t, o) = (0.012f32, 0.003f32);

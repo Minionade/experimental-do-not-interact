@@ -41,3 +41,16 @@ You supply the assets; nothing from Mojang is bundled here.
 - Translucent pass for water, ice and stained glass (alpha-blended, far chunks first, no depth writes).
 - `sky`: 24000-tick day (tick 0 sunrise, 6000 noon, 18000 midnight), sun/moon billboards, stars, dusk tint. Sun is HDR-bright.
   `T` skips 6000 ticks.
+
+## Survival
+
+`viewer` starts in survival by default; `--creative` gives an unlimited block hotbar, `--kit` a starter kit.
+
+- Mining uses the documented formula (speed / hardness / 30 when the tool can harvest, / 100 when not, /5 airborne and /5 with the
+  head in water), recalculated every tick. Stone by hand is 7.5 s, by wooden pickaxe 1.15 s; obsidian needs a diamond pickaxe.
+- Harvest rules gate drops (no cobblestone from bare hands, iron ore needs a stone pickaxe...). Leaves, gravel and glowstone roll chance drops.
+- Items are entities: thrown with a 2 s pickup delay (Q, Ctrl+Q for the stack), collected within a block of the player, despawn after 5 minutes.
+- Health: fall damage (1 per block beyond 3, cancelled by water), lava, drowning after 15 s of breath, regeneration; death drops the inventory and respawns.
+- Crafting (E opens the inventory/crafting screen): recipes come from the loaded pack's `data/.../recipe(s)` with `#tag` ingredients,
+  falling back to a built-in set for wood, tools, furnace, chest and torches. Up/Down select, Enter craft.
+- HUD with a hand-drawn 5x7 bitmap font, item icons from the pack (`textures/item`) or coloured fallbacks, crack overlay from `destroy_stage_N`.
