@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytemuck = { version = "1.25.2", optional = true, features = ["derive"] }
 flate2 = "1.1.10"
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-decode"] }
+pollster = { version = "1.0.1", optional = true }
 rayon = "1.12.0"
+wgpu = { version = "30.0.1", optional = true }
+winit = { version = "0.30.13", optional = true }
+
+[features]
+gpu = ["dep:wgpu", "dep:winit", "dep:bytemuck", "dep:pollster"]
+
+[[bin]]
+name = "viewer"
+path = "src/bin/viewer.rs"
+required-features = ["gpu"]
