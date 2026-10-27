@@ -1,11 +1,14 @@
 //! Windowed wgpu viewer with free-fly camera and streamed chunks.
 //! HDR: auto-selects scRGB or HDR10/PQ output when the surface supports it; `--sdr` forces SDR.
-//! Controls: click to grab mouse, WASD move, Space/Shift up/down, Ctrl sprint, Esc release/quit.
-use blockengine::chunk::Chunk;
-use blockengine::mesh::{mesh_chunk, Mesh, Vertex};
+//! Controls: click to grab mouse; WASD move, Space jump, Shift sneak, Ctrl sprint, F fly (Space up / Shift down),
+//! left click break, right click place, 1-9 or wheel select block, F5 save, Esc release/quit.
+use blockengine::access::SharedChunkMap;
+use blockengine::chunk::{BlockState, Chunk};
+use blockengine::game::{Game, Input};
+use blockengine::mesh::{entity_model, mesh_chunk, outline_mesh, Mesh, Vertex};
 use blockengine::world::{level_seed, read_level_dat, World};
-use blockengine::worldgen::Generator;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -17,6 +20,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 const RADIUS: i32 = 12;
 const IN_FLIGHT: usize = 16;
+const DYN_VERTS: usize = 1 << 16;
 const DEPTH_FMT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
@@ -74,7 +78,12 @@ struct VOut { @builtin(position) p: vec4<f32>, @location(0) c: vec3<f32>, @locat
     let fog = clamp(i.d / (u.eye.w), 0.0, 1.0);
     let sky = vec3<f32>(0.6, 0.75, 0.95);
     // Colours are authored in sRGB; decode to linear light. Emissive blocks exceed 1.0.
-    let lin = pow(mix(i.c, sky, fog * fog), vec3<f32>(2.2));
+    var lin = pow(mix(i.c, sky, fog * fog), vec3<f32>(2.2));
+    if (u.hdr.x < 0.5) {
+        // SDR can't show >1.0: scale by the brightest channel so emissive blocks keep their hue instead of clipping to yellow.
+        let m = max(max(lin.r, lin.g), lin.b);
+        if (m > 1.0) { lin = lin / m; }
+    }
     if (u.hdr.x < 1.5) {
         // Sdr: sRGB surface encodes for us. scRGB: linear passthrough, >1.0 is HDR.
         return vec4<f32>(lin, 1.0);
@@ -118,32 +127,40 @@ struct ChunkGpu { vb: wgpu::Buffer, ib: wgpu::Buffer, n: u32 }
 struct Gfx {
     window: Arc<Window>, surface: wgpu::Surface<'static>, device: wgpu::Device, queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration, pipeline: wgpu::RenderPipeline, depth: wgpu::TextureView,
-    ubuf: wgpu::Buffer, bind: wgpu::BindGroup, output: Output,
+    ubuf: wgpu::Buffer, bind: wgpu::BindGroup, ubuf_ui: wgpu::Buffer, bind_ui: wgpu::BindGroup, output: Output,
+    dyn_vb: wgpu::Buffer, dyn_ib: wgpu::Buffer, ui_vb: wgpu::Buffer, ui_ib: wgpu::Buffer,
 }
 
-struct Streamer {
-    generator: Arc<Generator>,
-    saved: Arc<Mutex<World>>,
-    cache: Arc<Mutex<HashMap<(i32, i32), Arc<Chunk>>>>,
-    tx: mpsc::Sender<(i32, i32, Mesh)>,
-    rx: mpsc::Receiver<(i32, i32, Mesh)>,
-    pending: HashSet<(i32, i32)>,
+enum Msg {
+    Chunk(Chunk),
+    Mesh { x: i32, z: i32, seq: u64, mesh: Mesh },
 }
 
-fn get_chunk(s: &Arc<Mutex<HashMap<(i32, i32), Arc<Chunk>>>>, generator: &Generator, world: &Mutex<World>, x: i32, z: i32) -> Arc<Chunk> {
-    if let Some(c) = s.lock().unwrap().get(&(x, z)) { return c.clone(); }
-    let loaded = { let mut w = world.lock().unwrap(); if w.load_chunk(x, z).unwrap_or(false) { w.chunks.remove(&(x, z)) } else { None } };
-    let c = Arc::new(loaded.unwrap_or_else(|| generator.generate(x, z)));
-    s.lock().unwrap().entry((x, z)).or_insert(c).clone()
-}
+/// Where chunks come from and where edits go.
+struct Source { read: Arc<Mutex<World>>, save_dir: Option<PathBuf> }
+
+const HOTBAR: [(&str, &str, &str, u8); 9] = [
+    ("Stone", "minecraft:stone", "", 0), ("Dirt", "minecraft:dirt", "", 0), ("Grass Block", "minecraft:grass_block", "", 0),
+    ("Oak Log", "minecraft:oak_log", "axis=y", 0), ("Oak Leaves", "minecraft:oak_leaves", "distance=1,persistent=true,waterlogged=false", 0),
+    ("Sand", "minecraft:sand", "", 0), ("Glowstone", "minecraft:glowstone", "", 0),
+    ("Water", "minecraft:water", "", 1), ("Lava", "minecraft:lava", "", 1),
+];
 
 struct App {
     gfx: Option<Gfx>,
-    st: Streamer,
+    game: Game,
+    src: Source,
+    tx: mpsc::Sender<Msg>,
+    rx: mpsc::Receiver<Msg>,
+    pending_gen: HashSet<(i32, i32)>,
+    mesh_seq: HashMap<(i32, i32), u64>,
+    next_seq: u64,
+    in_flight_meshes: usize,
     chunks: HashMap<(i32, i32), ChunkGpu>,
-    pos: [f32; 3], yaw: f32, pitch: f32,
+    yaw: f32, pitch: f32,
     keys: HashSet<KeyCode>, grabbed: bool, last: Instant,
     want_hdr: bool, paper_white: f32, output: Output,
+    selected: usize, mouse_left: bool, mouse_right: bool, click_left: bool, click_right: bool, act_cd: f32, title_t: f32,
 }
 
 impl App {
@@ -181,11 +198,13 @@ impl App {
                 ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None }],
         });
-        let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+        let mk_ubuf = || device.create_buffer(&wgpu::BufferDescriptor {
             label: None, size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None, layout: &bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }] });
+        let (ubuf, ubuf_ui) = (mk_ubuf(), mk_ubuf());
+        let mk_bind = |b: &wgpu::Buffer| device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: b.as_entire_binding() }] });
+        let (bind, bind_ui) = (mk_bind(&ubuf), mk_bind(&ubuf_ui));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
@@ -201,7 +220,13 @@ impl App {
             multisample: Default::default(), multiview_mask: None, cache: None,
         });
         let depth = Self::depth_view(&device, &config);
-        self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind, output });
+        let mk_buf = |size: u64, usage| device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false });
+        let vu = wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST;
+        let iu = wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST;
+        let (dyn_vb, dyn_ib) = (mk_buf((DYN_VERTS * 24) as u64, vu), mk_buf((DYN_VERTS * 6 * 4) as u64, iu));
+        let (ui_vb, ui_ib) = (mk_buf(24 * 16, vu), mk_buf(4 * 16, iu));
+        self.gfx = Some(Gfx { window, surface, device, queue, config, pipeline, depth, ubuf, bind, ubuf_ui, bind_ui, output,
+            dyn_vb, dyn_ib, ui_vb, ui_ib });
     }
 
     fn depth_view(device: &wgpu::Device, c: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
@@ -215,56 +240,132 @@ impl App {
         [self.yaw.sin() * self.pitch.cos(), self.pitch.sin(), self.yaw.cos() * self.pitch.cos()]
     }
 
+    fn pos(&self) -> [f32; 3] { let e = self.game.eye(); [e[0] as f32, e[1] as f32, e[2] as f32] }
+
+    fn key(&self, k: KeyCode) -> bool { self.keys.contains(&k) }
+
+    fn save(&mut self) {
+        let Some(dir) = self.src.save_dir.clone() else { eprintln!("world is read-only (pass --write to save into a Java world)"); return };
+        match self.game.save(&dir) {
+            Ok(n) => eprintln!("saved {n} chunks to {}", dir.display()),
+            Err(e) => eprintln!("save failed: {e}"),
+        }
+    }
+
     fn update(&mut self) {
         let now = Instant::now();
-        let dt = (now - self.last).as_secs_f32().min(0.1);
+        let dt = (now - self.last).as_secs_f32().min(0.25);
         self.last = now;
-        let speed = if self.keys.contains(&KeyCode::ControlLeft) { 60.0 } else { 20.0 } * dt;
-        let f = self.forward();
-        let flat = { let l = (f[0] * f[0] + f[2] * f[2]).sqrt().max(1e-4); [f[0] / l, f[2] / l] };
-        let mut d = [0.0f32; 3];
-        let k = |c| self.keys.contains(&c);
-        if k(KeyCode::KeyW) { d[0] += flat[0]; d[2] += flat[1]; }
-        if k(KeyCode::KeyS) { d[0] -= flat[0]; d[2] -= flat[1]; }
-        if k(KeyCode::KeyD) { d[0] -= flat[1]; d[2] += flat[0]; }
-        if k(KeyCode::KeyA) { d[0] += flat[1]; d[2] -= flat[0]; }
-        if k(KeyCode::Space) { d[1] += 1.0; }
-        if k(KeyCode::ShiftLeft) { d[1] -= 1.0; }
-        for i in 0..3 { self.pos[i] += d[i] * speed; }
 
-        // Stream: drain finished meshes, request nearest missing chunks.
-        let Some(g) = &self.gfx else { return };
-        while let Ok((x, z, m)) = self.st.rx.try_recv() {
-            self.st.pending.remove(&(x, z));
-            if m.indices.is_empty() { self.chunks.remove(&(x, z)); continue; }
-            let verts: Vec<GpuVertex> = m.vertices.iter().map(|v: &Vertex| GpuVertex { pos: [v.pos[0] + x as f32 * 16.0, v.pos[1], v.pos[2] + z as f32 * 16.0], color: v.color }).collect();
-            let vb = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX });
-            let ib = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&m.indices), usage: wgpu::BufferUsages::INDEX });
-            self.chunks.insert((x, z), ChunkGpu { vb, ib, n: m.indices.len() as u32 });
+        // Input -> player.
+        let input = Input { forward: self.key(KeyCode::KeyW), back: self.key(KeyCode::KeyS), left: self.key(KeyCode::KeyA),
+            right: self.key(KeyCode::KeyD), jump: self.key(KeyCode::Space), sneak: self.key(KeyCode::ShiftLeft),
+            sprint: self.key(KeyCode::ControlLeft) };
+        self.game.set_input(input, self.yaw as f64);
+        self.game.update(dt as f64);
+
+        // Block interaction (rate limited like holding a mouse button in creative).
+        self.act_cd -= dt;
+        // A click that was pressed and released within one frame still counts once.
+        let (left, right) = (self.mouse_left || self.click_left, self.mouse_right || self.click_right);
+        let fresh = self.click_left || self.click_right;
+        self.click_left = false; self.click_right = false;
+        if self.grabbed && (self.act_cd <= 0.0 || fresh) && (left || right) {
+            let f = self.forward();
+            if let Some(hit) = self.game.target([f[0] as f64, f[1] as f64, f[2] as f64]) {
+                if left { self.game.break_block(hit.pos); }
+                else {
+                    let at = [hit.pos[0] + hit.normal[0], hit.pos[1] + hit.normal[1], hit.pos[2] + hit.normal[2]];
+                    let (_, name, props, _) = HOTBAR[self.selected];
+                    let b = if HOTBAR[self.selected].3 == 1 { BlockState::fluid(name, 0) } else { BlockState { name: name.into(), props: props.into() } };
+                    self.game.place_block(at, &b);
+                }
+                self.act_cd = 0.18;
+            }
         }
-        let (pcx, pcz) = ((self.pos[0] / 16.0).floor() as i32, (self.pos[2] / 16.0).floor() as i32);
-        self.chunks.retain(|&(x, z), _| (x - pcx).abs() <= RADIUS + 2 && (z - pcz).abs() <= RADIUS + 2);
-        if self.st.pending.len() >= IN_FLIGHT { return; }
-        let mut want: Vec<(i32, i32)> = (-RADIUS..=RADIUS).flat_map(|dx| (-RADIUS..=RADIUS).map(move |dz| (pcx + dx, pcz + dz)))
-            .filter(|c| !self.chunks.contains_key(c) && !self.st.pending.contains(c)).collect();
-        want.sort_by_key(|&(x, z)| (x - pcx).pow(2) + (z - pcz).pow(2));
-        for (x, z) in want.into_iter().take(IN_FLIGHT - self.st.pending.len()) {
-            self.st.pending.insert((x, z));
-            let (generator, cache, tx, world) = (self.st.generator.clone(), self.st.cache.clone(), self.st.tx.clone(), self.st.saved.clone());
+
+        self.title_t -= dt;
+        if self.title_t <= 0.0 {
+            self.title_t = 0.5;
+            if let Some(g) = &self.gfx {
+                let p = self.game.player_pos();
+                g.window.set_title(&format!("blockengine | {} [{}] | {:.0} {:.0} {:.0} | {} chunks",
+                    HOTBAR[self.selected].0, self.selected + 1, p[0], p[1], p[2], self.chunks.len()));
+            }
+        }
+        self.stream();
+    }
+
+    /// Chunk loading, meshing jobs, GPU uploads and unloading.
+    fn stream(&mut self) {
+        let Some(g) = &self.gfx else { return };
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                Msg::Chunk(c) => { self.pending_gen.remove(&(c.x, c.z)); self.game.insert_chunk(c); }
+                Msg::Mesh { x, z, seq, mesh } => {
+                    self.in_flight_meshes -= 1;
+                    if self.mesh_seq.get(&(x, z)) != Some(&seq) { continue; } // superseded by a newer job
+                    if mesh.indices.is_empty() { self.chunks.remove(&(x, z)); continue; }
+                    let verts: Vec<GpuVertex> = mesh.vertices.iter().map(|v: &Vertex| GpuVertex { pos: [v.pos[0] + x as f32 * 16.0, v.pos[1], v.pos[2] + z as f32 * 16.0], color: v.color }).collect();
+                    let vb = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&verts), usage: wgpu::BufferUsages::VERTEX });
+                    let ib = g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&mesh.indices), usage: wgpu::BufferUsages::INDEX });
+                    self.chunks.insert((x, z), ChunkGpu { vb, ib, n: mesh.indices.len() as u32 });
+                }
+            }
+        }
+        let p = self.game.player_pos();
+        let (pcx, pcz) = ((p[0] / 16.0).floor() as i32, (p[2] / 16.0).floor() as i32);
+        let dist = |&(x, z): &(i32, i32)| (x - pcx).pow(2) + (z - pcz).pow(2);
+
+        // Unload far chunks (never ones holding unsaved edits).
+        let far = |&(x, z): &(i32, i32)| (x - pcx).abs() > RADIUS + 3 || (z - pcz).abs() > RADIUS + 3;
+        let drop: Vec<_> = self.game.blocks.chunks.keys().filter(|k| far(k) && !self.game.blocks.modified.contains(*k)).copied().collect();
+        for k in drop { self.game.blocks.chunks.remove(&k); self.chunks.remove(&k); self.mesh_seq.remove(&k); self.game.blocks.dirty.remove(&k); }
+        self.chunks.retain(|k, _| !far(k));
+
+        // Request chunks out to RADIUS+1 so the visible ring always has all 8 neighbours.
+        if self.pending_gen.len() < IN_FLIGHT {
+            let r = RADIUS + 1;
+            let mut want: Vec<(i32, i32)> = (-r..=r).flat_map(|dx| (-r..=r).map(move |dz| (pcx + dx, pcz + dz)))
+                .filter(|c| !self.game.blocks.chunks.contains_key(c) && !self.pending_gen.contains(c)).collect();
+            want.sort_by_key(dist);
+            for (x, z) in want.into_iter().take(IN_FLIGHT - self.pending_gen.len()) {
+                self.pending_gen.insert((x, z));
+                let (generator, tx, read) = (self.game.generator.clone(), self.tx.clone(), self.src.read.clone());
+                rayon::spawn(move || {
+                    let loaded = { let mut w = read.lock().unwrap(); if w.load_chunk(x, z).unwrap_or(false) { w.chunks.remove(&(x, z)) } else { None } };
+                    let c = match loaded {
+                        Some(mut c) => { blockengine::light::compute(&mut c); c }
+                        None => generator.generate(x, z),
+                    };
+                    let _ = tx.send(Msg::Chunk(c));
+                });
+            }
+        }
+
+        // Mesh dirty chunks (nearest first) once all 8 neighbours are present.
+        let mut todo: Vec<(i32, i32)> = self.game.blocks.dirty.iter().copied()
+            .filter(|c| self.game.blocks.chunks.contains_key(c) && dist(c) <= RADIUS * RADIUS).collect();
+        todo.sort_by_key(dist);
+        self.game.blocks.dirty.retain(|c| self.game.blocks.chunks.contains_key(c));
+        for (x, z) in todo {
+            if self.in_flight_meshes >= IN_FLIGHT { break; }
+            let snapshot: Vec<_> = (-1..=1).flat_map(|dx| (-1..=1).map(move |dz| (x + dx, z + dz)))
+                .filter_map(|k| self.game.blocks.chunks.get(&k).map(|c| (k, c.clone()))).collect();
+            if snapshot.len() < 9 { continue; } // stays dirty until neighbours arrive
+            self.game.blocks.dirty.remove(&(x, z));
+            self.next_seq += 1;
+            let seq = self.next_seq;
+            self.mesh_seq.insert((x, z), seq);
+            self.in_flight_meshes += 1;
+            let tx = self.tx.clone();
             rayon::spawn(move || {
-                // Clone the 3x3 neighbourhood so light can be stitched across borders without mutating the cache.
-                let mut map = blockengine::access::ChunkMap::new();
-                for dx in -1..=1 { for dz in -1..=1 {
-                    map.insert((x + dx, z + dz), (*get_chunk(&cache, &generator, &world, x + dx, z + dz)).clone());
-                }}
+                // Private copy-on-write view so stitching light never disturbs the live world.
+                let mut map: SharedChunkMap = snapshot.into_iter().collect();
                 blockengine::light::stitch(&mut map, x, z);
-                let n = |dx, dz| map.get(&(x + dx, z + dz));
-                let m = mesh_chunk(&map[&(x, z)], [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)]);
-                // keep the cache bounded
-                let mut cc = cache.lock().unwrap();
-                if cc.len() > 4000 { cc.clear(); }
-                drop(cc);
-                let _ = tx.send((x, z, m));
+                let n = |dx, dz| map.get(&(x + dx, z + dz)).map(|c| &**c);
+                let mesh = mesh_chunk(&map[&(x, z)], [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)]);
+                let _ = tx.send(Msg::Mesh { x, z, seq, mesh });
             });
         }
     }
@@ -272,10 +373,47 @@ impl App {
     fn render(&mut self) {
         let Some(g) = &self.gfx else { return };
         let aspect = g.config.width as f32 / g.config.height as f32;
-        let u = Uniforms { view_proj: view_proj(self.pos, self.forward(), aspect), eye: [self.pos[0], self.pos[1], self.pos[2], (RADIUS * 16) as f32],
-            hdr: [g.output.mode(), self.paper_white, 0.0, 0.0] };
-        let sky = encode_for_output([0.6f64.powf(2.2), 0.75f64.powf(2.2), 0.95f64.powf(2.2)], g.output, self.paper_white);
+        let eye = self.pos();
+        let hdr = [g.output.mode(), self.paper_white, 0.0, 0.0];
+        let u = Uniforms { view_proj: view_proj(eye, self.forward(), aspect), eye: [eye[0], eye[1], eye[2], (RADIUS * 16) as f32], hdr };
         g.queue.write_buffer(&g.ubuf, 0, bytemuck::bytes_of(&u));
+        // UI pass uses clip-space vertices: identity matrix, fog disabled by a huge fog distance.
+        let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        g.queue.write_buffer(&g.ubuf_ui, 0, bytemuck::bytes_of(&Uniforms { view_proj: ident, eye: [0.0, 0.0, 0.0, 1e9], hdr }));
+
+        // Entities + block outline, rebuilt every frame.
+        let mut dynm = Mesh::default();
+        for e in &self.game.entities.entities {
+            if e.id == self.game.player { continue; }
+            let m = entity_model(e);
+            let base = dynm.vertices.len() as u32;
+            dynm.vertices.extend(m.vertices);
+            dynm.indices.extend(m.indices.into_iter().map(|i| i + base));
+        }
+        let f = self.forward();
+        if let Some(hit) = self.game.target([f[0] as f64, f[1] as f64, f[2] as f64]) {
+            let m = outline_mesh(hit.pos);
+            let base = dynm.vertices.len() as u32;
+            dynm.vertices.extend(m.vertices);
+            dynm.indices.extend(m.indices.into_iter().map(|i| i + base));
+        }
+        dynm.vertices.truncate(DYN_VERTS);
+        dynm.indices.retain(|&i| (i as usize) < dynm.vertices.len());
+        dynm.indices.truncate(dynm.indices.len() / 3 * 3);
+        let dverts: Vec<GpuVertex> = dynm.vertices.iter().map(|v| GpuVertex { pos: v.pos, color: v.color }).collect();
+        g.queue.write_buffer(&g.dyn_vb, 0, bytemuck::cast_slice(&dverts));
+        g.queue.write_buffer(&g.dyn_ib, 0, bytemuck::cast_slice(&dynm.indices));
+        // Crosshair: two quads in NDC, aspect-corrected.
+        let (a, t) = (0.018f32, 0.0025f32);
+        let ax = a / aspect; let tx = t / aspect;
+        let white = [1.0f32, 1.0, 1.0];
+        let quad = |x0: f32, y0: f32, x1: f32, y1: f32| [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        let mut ui: Vec<GpuVertex> = Vec::new();
+        for q in [quad(-ax, -t, ax, t), quad(-tx, -a, tx, a)] { for p in q { ui.push(GpuVertex { pos: [p[0], p[1], 0.0], color: white }); } }
+        g.queue.write_buffer(&g.ui_vb, 0, bytemuck::cast_slice(&ui));
+        g.queue.write_buffer(&g.ui_ib, 0, bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]));
+
+        let sky = encode_for_output([0.6f64.powf(2.2), 0.75f64.powf(2.2), 0.95f64.powf(2.2)], g.output, self.paper_white);
         let frame = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => { g.surface.configure(&g.device, &g.config); return }
@@ -299,6 +437,15 @@ impl App {
                 p.set_index_buffer(c.ib.slice(..), wgpu::IndexFormat::Uint32);
                 p.draw_indexed(0..c.n, 0, 0..1);
             }
+            if !dynm.indices.is_empty() {
+                p.set_vertex_buffer(0, g.dyn_vb.slice(..));
+                p.set_index_buffer(g.dyn_ib.slice(..), wgpu::IndexFormat::Uint32);
+                p.draw_indexed(0..dynm.indices.len() as u32, 0, 0..1);
+            }
+            p.set_bind_group(0, &g.bind_ui, &[]);
+            p.set_vertex_buffer(0, g.ui_vb.slice(..));
+            p.set_index_buffer(g.ui_ib.slice(..), wgpu::IndexFormat::Uint32);
+            p.draw_indexed(0..12, 0, 0..1);
         }
         g.queue.submit([enc.finish()]);
         g.window.pre_present_notify();
@@ -310,24 +457,51 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) { if self.gfx.is_none() { self.init_gfx(el); } }
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
         match ev {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => { self.save(); el.exit() }
             WindowEvent::Resized(s) => if let Some(g) = &mut self.gfx {
                 g.config.width = s.width.max(1); g.config.height = s.height.max(1);
                 g.surface.configure(&g.device, &g.config);
                 g.depth = Self::depth_view(&g.device, &g.config);
             },
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => if let Some(g) = &self.gfx {
-                self.grabbed = g.window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| g.window.set_cursor_grab(CursorGrabMode::Confined)).is_ok();
-                g.window.set_cursor_visible(!self.grabbed);
-            },
-            WindowEvent::KeyboardInput { event, .. } => if let PhysicalKey::Code(k) = event.physical_key {
-                if event.state == ElementState::Pressed {
-                    if k == KeyCode::Escape {
-                        if self.grabbed { if let Some(g) = &self.gfx { let _ = g.window.set_cursor_grab(CursorGrabMode::None); g.window.set_cursor_visible(true); } self.grabbed = false; }
-                        else { el.exit(); }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let down = state == ElementState::Pressed;
+                if down && !self.grabbed && button == MouseButton::Left {
+                    if let Some(g) = &self.gfx {
+                        self.grabbed = g.window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| g.window.set_cursor_grab(CursorGrabMode::Confined)).is_ok();
+                        g.window.set_cursor_visible(!self.grabbed);
                     }
-                    self.keys.insert(k);
-                } else { self.keys.remove(&k); }
+                } else {
+                    match button {
+                        MouseButton::Left => { self.mouse_left = down; if down { self.click_left = true; } }
+                        MouseButton::Right => { self.mouse_right = down; if down { self.click_right = true; } }
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 30.0 };
+                if dy != 0.0 { self.selected = (self.selected as i32 - dy.signum() as i32).rem_euclid(9) as usize; }
+            }
+            WindowEvent::KeyboardInput { event, .. } => if let PhysicalKey::Code(k) = event.physical_key {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    match k {
+                        KeyCode::Escape => {
+                            if self.grabbed {
+                                if let Some(g) = &self.gfx { let _ = g.window.set_cursor_grab(CursorGrabMode::None); g.window.set_cursor_visible(true); }
+                                self.grabbed = false; self.mouse_left = false; self.mouse_right = false;
+                            } else { self.save(); el.exit(); }
+                        }
+                        KeyCode::KeyF => self.game.toggle_flying(),
+                        KeyCode::F5 => self.save(),
+                        KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5
+                        | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 => {
+                            self.selected = match k { KeyCode::Digit1 => 0, KeyCode::Digit2 => 1, KeyCode::Digit3 => 2, KeyCode::Digit4 => 3,
+                                KeyCode::Digit5 => 4, KeyCode::Digit6 => 5, KeyCode::Digit7 => 6, KeyCode::Digit8 => 7, _ => 8 };
+                        }
+                        _ => {}
+                    }
+                }
+                if event.state == ElementState::Pressed { self.keys.insert(k); } else { self.keys.remove(&k); }
             },
             WindowEvent::RedrawRequested => { self.update(); self.render(); if let Some(g) = &self.gfx { g.window.request_redraw(); } }
             _ => {}
@@ -342,24 +516,37 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    // usage: viewer [seed | path/to/java/world] [--sdr] [--paper-white=NITS]
+    // usage: viewer [seed | path/to/java/world] [--sdr] [--paper-white=NITS] [--write]
     let args: Vec<String> = std::env::args().skip(1).collect();
     let want_hdr = !args.iter().any(|a| a == "--sdr");
+    let allow_write = args.iter().any(|a| a == "--write");
     let paper_white = args.iter().find_map(|a| a.strip_prefix("--paper-white=")?.parse().ok()).unwrap_or(203.0f32);
     let arg = args.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "1".into());
     let path = std::path::Path::new(&arg);
-    let (seed, world) = if path.join("level.dat").exists() {
+    let (seed, read_dir, save_dir) = if path.join("level.dat").exists() {
         let seed = read_level_dat(path).ok().and_then(|l| level_seed(&l)).unwrap_or(0);
         eprintln!("loading Java world {arg} (seed {seed}); missing chunks use the built-in generator");
-        (seed, World::open(path))
-    } else { (arg.parse().unwrap_or(1), World::open("/nonexistent")) };
-    let generator = Arc::new(Generator::new(seed));
-    let h = generator.surface_height(0, 0).max(63) as f32;
+        // Writing re-encodes chunks in our format, which drops data we don't model (block entities, entities, structures).
+        let save = if allow_write { Some(path.to_path_buf()) } else { None };
+        (seed, path.to_path_buf(), save)
+    } else {
+        let seed: i64 = arg.parse().unwrap_or(1);
+        let dir = PathBuf::from(format!("saves/seed_{seed}"));
+        (seed, dir.clone(), Some(dir))
+    };
     let (tx, rx) = mpsc::channel();
+    let mut game = Game::new(seed);
+    // A few pigs around spawn; they freeze until their chunk loads, then drop onto the terrain.
+    for i in 0..6 {
+        let (x, z) = (4 + i * 3, -6 + (i * 5) % 11);
+        let h = game.generator.surface_height(x, z).max(blockengine::worldgen::SEA_LEVEL);
+        game.entities.spawn(blockengine::entity::Kind::Pig, [x as f64 + 0.5, h as f64 + 2.0, z as f64 + 0.5]);
+    }
     let mut app = App {
-        gfx: None, chunks: HashMap::new(), pos: [0.0, h + 20.0, 0.0], yaw: 0.0, pitch: -0.3,
-        keys: HashSet::new(), grabbed: false, last: Instant::now(), want_hdr, paper_white, output: Output::Sdr,
-        st: Streamer { generator, saved: Arc::new(Mutex::new(world)), cache: Arc::default(), tx, rx, pending: HashSet::new() },
+        gfx: None, game, src: Source { read: Arc::new(Mutex::new(World::open(read_dir))), save_dir },
+        tx, rx, pending_gen: HashSet::new(), mesh_seq: HashMap::new(), next_seq: 0, in_flight_meshes: 0, chunks: HashMap::new(),
+        yaw: 0.0, pitch: -0.3, keys: HashSet::new(), grabbed: false, last: Instant::now(),
+        want_hdr, paper_white, output: Output::Sdr, selected: 0, mouse_left: false, mouse_right: false, click_left: false, click_right: false, act_cd: 0.0, title_t: 0.0,
     };
     let el = EventLoop::new().unwrap();
     el.set_control_flow(ControlFlow::Poll);

@@ -13,10 +13,18 @@ impl BlockState {
     pub fn air() -> Self { Self { name: "minecraft:air".into(), props: String::new() } }
     pub fn simple(name: &str) -> Self { Self { name: name.into(), props: String::new() } }
     pub fn is_air(&self) -> bool { matches!(self.name.as_str(), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") }
-    /// Blocks entities collide with. Fluids, air, torches and plants are passable.
+    /// Non-cube decorations we don't model yet (plants, torches). Not rendered and not collided with.
+    pub fn is_plant(&self) -> bool {
+        let n = self.name.strip_prefix("minecraft:").unwrap_or(&self.name);
+        matches!(n, "torch" | "wall_torch" | "fire" | "short_grass" | "tall_grass" | "fern" | "large_fern" | "dead_bush"
+            | "dandelion" | "poppy" | "vine" | "seagrass" | "tall_seagrass" | "kelp" | "kelp_plant" | "lily_pad" | "sugar_cane"
+            | "snow" | "rail" | "ladder" | "cobweb")
+            || n.ends_with("_sapling") || n.ends_with("_tulip") || n.ends_with("_flower") || n.ends_with("_bush")
+            || n.ends_with("_mushroom") || n.ends_with("_carpet") || n.ends_with("_button") || n.ends_with("_pressure_plate")
+    }
+    /// Blocks entities collide with. Fluids, air and plants are passable.
     pub fn is_solid(&self) -> bool {
-        !self.is_air() && !matches!(self.name.as_str(),
-            "minecraft:water" | "minecraft:lava" | "minecraft:torch" | "minecraft:short_grass" | "minecraft:fire")
+        !self.is_air() && !self.is_plant() && !matches!(self.name.as_str(), "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column")
     }
     /// Fluid level from the `level` property: 0 = source, 1..=7 flowing, 8+ falling. None if not a fluid.
     pub fn fluid_level(&self) -> Option<u8> {

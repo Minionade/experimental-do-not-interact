@@ -1,5 +1,5 @@
 //! Chunk-local light propagation (sky + block light) via BFS.
-use crate::access::{BlockAccess, ChunkMap, ChunkStore};
+use crate::access::{BlockAccess, ChunkStore};
 use crate::chunk::{Chunk, HEIGHT, MIN_Y};
 use std::collections::VecDeque;
 
@@ -145,6 +145,7 @@ pub fn stitch(store: &mut impl ChunkStore, cx: i32, cz: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::ChunkMap;
     use crate::chunk::BlockState;
     #[test]
     fn light_crosses_chunk_borders() {

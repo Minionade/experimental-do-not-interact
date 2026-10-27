@@ -10,7 +10,7 @@ pub struct Vertex { pub pos: [f32; 3], pub color: [f32; 3] }
 pub struct Mesh { pub vertices: Vec<Vertex>, pub indices: Vec<u32> }
 
 pub fn block_color(name: &str) -> [f32; 3] {
-    let c = match name {
+    let c: [i32; 3] = match name {
         "minecraft:grass_block" => [95, 159, 53], "minecraft:sand" => [219, 207, 142],
         "minecraft:water" => [50, 80, 200], "minecraft:stone" => [125, 125, 125],
         "minecraft:dirt" => [134, 96, 67], "minecraft:bedrock" => [50, 50, 50],
@@ -20,7 +20,23 @@ pub fn block_color(name: &str) -> [f32; 3] {
         "minecraft:gold_ore" => [230, 200, 60], "minecraft:diamond_ore" => [90, 220, 220],
         "minecraft:lava" => [255, 110, 20], "minecraft:glowstone" => [255, 200, 110],
         "minecraft:sea_lantern" => [200, 230, 220], "minecraft:torch" => [255, 190, 80],
-        _ => [200, 0, 200],
+        "minecraft:deepslate" => [80, 80, 86], "minecraft:tuff" => [108, 109, 102], "minecraft:gravel" => [131, 127, 126],
+        "minecraft:cobblestone" => [118, 118, 118], "minecraft:obsidian" => [20, 18, 30], "minecraft:clay" => [160, 166, 179],
+        "minecraft:ice" | "minecraft:packed_ice" => [145, 183, 253], "minecraft:netherrack" => [111, 54, 53],
+        "minecraft:mycelium" => [111, 98, 102], "minecraft:podzol" => [91, 63, 24], "minecraft:coarse_dirt" => [119, 85, 59],
+        "minecraft:red_sand" => [190, 102, 33], "minecraft:terracotta" => [152, 94, 67], "minecraft:andesite" => [136, 136, 136],
+        "minecraft:diorite" => [188, 188, 188], "minecraft:granite" => [149, 103, 85], "minecraft:grass_path" | "minecraft:dirt_path" => [148, 122, 65],
+        "minecraft:spruce_leaves" => [48, 92, 52], "minecraft:birch_leaves" => [105, 145, 70], "minecraft:jungle_leaves" => [40, 140, 30],
+        "minecraft:acacia_leaves" | "minecraft:dark_oak_leaves" | "minecraft:azalea_leaves" | "minecraft:mangrove_leaves" => [60, 110, 40],
+        n if n.ends_with("_log") || n.ends_with("_wood") => [100, 78, 48],
+        n if n.ends_with("_planks") => [162, 130, 78],
+        n if n.ends_with("_leaves") => [60, 120, 40],
+        n if n.ends_with("_ore") => [120, 120, 120],
+        // Unknown block: stable muted colour derived from its name so real Java worlds stay readable.
+        n => {
+            let h = n.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+            [90 + (h & 127) as i32, 90 + ((h >> 8) & 127) as i32, 90 + ((h >> 16) & 127) as i32]
+        }
     };
     [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]
 }
@@ -52,7 +68,7 @@ pub fn mesh_chunk(c: &Chunk, nb: [Option<&Chunk>; 4]) -> Mesh {
         if s.palette.len() == 1 && s.palette[0].is_air() { continue; }
         for ly in 0..16usize { for z in 0..16usize { for x in 0..16usize {
             let b = s.get(x, ly, z);
-            if b.is_air() { continue; }
+            if b.is_air() || b.is_plant() { continue; }
             let y = MIN_Y + (si * 16 + ly) as i32;
             let is_water = matches!(b.name.as_str(), "minecraft:water" | "minecraft:lava");
             // Emissive blocks ignore ambient light and exceed 1.0 so HDR outputs can show them brighter than white.
