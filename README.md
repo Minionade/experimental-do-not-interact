@@ -1,8 +1,8 @@
 # Experimental voxel engine
 
-Rust engine foundation for a Minecraft-like game with **3D octree chunks, spherical planets, spaceflight, and native rigid-body physics**. The working crate name is `orbital-voxel`.
+Rust foundation targeting **1:1 Minecraft Java 26.3 content and gameplay**, with **3D octree chunks, spherical planets, spaceflight, and native rigid-body physics**. The working crate name is `orbital-voxel`.
 
-**This is a runnable engine prototype, not a port of Minecraft 26.3.** It does not contain Minecraft gameplay, assets, world loading, networking, or Java mod compatibility. The renderer uses engine-owned shaders; Iris shaderpack compatibility is outside the project requirements.
+**This is a runnable engine prototype, not a port of Minecraft 26.3.** Minecraft gameplay, world loading, networking, and Java mod compatibility are not implemented. A verified vanilla-resource importer is implemented; the desktop scene still uses diagnostic geometry and colors. The renderer uses engine-owned shaders; Iris shaderpack compatibility is outside the project requirements.
 
 ## Run
 
@@ -30,6 +30,18 @@ cargo test --locked --no-default-features
 cargo run --locked --release --no-default-features -- --headless --mesh-bench
 cargo run --locked --no-default-features --example flight_mod
 ```
+
+## Vanilla content parity
+
+All base-game items, tools, blocks, entities, names, textures, models, recipes, and behavior must match Minecraft 26.3. The octree/planetary engine must not introduce renamed substitutes or a reduced replacement content roster.
+
+The importer reads an official 26.3 client JAR, checks its exact size/SHA-1 and embedded version, and retains original names, PNG bytes, blockstates, item definitions and model fields. The report parser keeps registry IDs and global block-state IDs separate. Octree cells use 32-bit IDs.
+
+```powershell
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar "$env:APPDATA\.minecraft\versions\26.3\26.3.jar" --audit-models --inspect-item minecraft:diamond_pickaxe --inspect-block minecraft:stone --inspect-entity minecraft:zombie
+```
+
+This currently audits and resolves resources. It does **not** yet render or implement the vanilla roster. Original game assets are read from your installation and are not included in the repository. See [the parity contract](docs/vanilla-parity.md).
 
 ## Controls
 
@@ -71,6 +83,7 @@ A graphics-free CI job runs the core tests. Desktop CI builds for Windows and Li
 
 ## Direction
 
+- [Vanilla parity contract and resource import](docs/vanilla-parity.md)
 - [Architecture and octree decisions](docs/architecture.md)
 - [Minecraft 26.3 parity and implementation roadmap](docs/roadmap.md)
 

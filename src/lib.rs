@@ -5,3 +5,4 @@ pub mod mods;
 pub mod octree;
 pub mod physics;
 pub mod planet;
+pub mod vanilla;

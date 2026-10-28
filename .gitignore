@@ -3,3 +3,9 @@
 *.ppm
 *.log
 /demo-save.json
+
+# Official game data are local inputs, not source assets.
+*.jar
+/.minecraft/
+/vanilla/
+/generated-reports/

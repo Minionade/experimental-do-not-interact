@@ -20,7 +20,7 @@ fn every_octant_is_addressable() {
         for y in [-31, 31] {
             for x in [-31, 31] {
                 let p = IVec3::new(x, y, z);
-                let id = ((x > 0) as u16 + 2 * (y > 0) as u16 + 4 * (z > 0) as u16) + 1;
+                let id = ((x > 0) as u32 + 2 * (y > 0) as u32 + 4 * (z > 0) as u32) + 1;
                 tree.set(p, id).unwrap();
                 assert_eq!(tree.get(p), Some(id));
             }
@@ -44,14 +44,14 @@ fn reverting_edits_compresses_tree() {
 #[test]
 fn octree_matches_dense_reference() {
     let mut t = BlockOctree::new(IVec3::ZERO, 32).unwrap();
-    let mut dense = vec![0u16; 32 * 32 * 32];
+    let mut dense = vec![0u32; 32 * 32 * 32];
     let mut rng = 17u32;
     for _ in 0..10000 {
         rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
         let x = (rng & 31) as i32;
         let y = ((rng >> 5) & 31) as i32;
         let z = ((rng >> 10) & 31) as i32;
-        let id = ((rng >> 15) & 3) as u16;
+        let id = (rng >> 15) & 3;
         t.set(IVec3::new(x, y, z), id).unwrap();
         dense[(x + 32 * (y + 32 * z)) as usize] = id;
     }
@@ -330,4 +330,12 @@ fn terrain_mesh_is_watertight_across_chunks() {
         "{} unpaired/nonmanifold edges",
         edges.values().filter(|n| **n != 2).count()
     );
+}
+
+#[test]
+fn octree_preserves_large_vanilla_state_ids() {
+    let mut tree = BlockOctree::new(IVec3::ZERO, 16).unwrap();
+    tree.set(IVec3::ZERO, 90001).unwrap();
+    let loaded = BlockOctree::from_json(&tree.to_json().unwrap()).unwrap();
+    assert_eq!(loaded.get(IVec3::ZERO), Some(90001));
 }

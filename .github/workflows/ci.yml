@@ -1,5 +1,9 @@
 name: Rust checks and desktop builds
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -17,6 +21,7 @@ jobs:
       - run: cargo run --locked --release --no-default-features -- --headless --mesh-bench
   desktop:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -37,5 +42,7 @@ jobs:
           path: |
             target/release/orbital-voxel
             target/release/orbital-voxel.exe
+            target/release/vanilla-audit
+            target/release/vanilla-audit.exe
             examples/mods/
             README.md

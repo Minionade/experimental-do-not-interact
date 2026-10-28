@@ -2,6 +2,7 @@
 name = "orbital-voxel"
 version = "0.1.0"
 edition = "2021"
+default-run = "orbital-voxel"
 description = "Experimental octree voxel planets, native rendering and rigid-body physics"
 
 [features]
@@ -16,6 +17,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 rayon = "1.10"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+sha1 = "0.10"
 bytemuck = { version = "1", features = ["derive"] }
 sdl2 = { version = "0.37", optional = true }
 glow = { version = "0.16", optional = true }

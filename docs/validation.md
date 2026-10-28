@@ -6,7 +6,7 @@ Validated on Linux x86-64 with Rust 1.99.1, using the dependencies in Cargo.lock
 
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --locked --all-targets -- -D warnings`: passed.
-- `cargo test --locked`: **23 tests passed**.
+- `cargo test --locked`: **33 tests passed**.
 - `cargo build --locked --release`: passed with dynamically linked SDL2.
 - Desktop smoke test: three rendered frames, no OpenGL error, PNG output inspected. The renderer reported Mesa llvmpipe (LLVM 20.1.2), OpenGL 4.5 core. This is software rendering, not a dedicated-GPU performance benchmark.
 - The three-frame scene submitted 65 draws and 76,800 triangles on the final frame.
@@ -20,6 +20,14 @@ Validated on Linux x86-64 with Rust 1.99.1, using the dependencies in Cargo.lock
 The tests cover all octants and negative coordinates, randomized octree edits against a dense reference, compression after undoing edits, serialization validation, Morton-style node ancestry, cubic bounds, pole crossing, surface circumnavigation, radial gravity continuity, large-coordinate subtraction, LOD hysteresis, surface winding, matching density samples at chunk boundaries, watertight mesh edges, hidden block-face removal, planetary contact, compound-body launch, frame-time partitioning, atomic mod registry loads, and native mod commands in fixed physics ticks.
 
 The mesh-edge test verifies the uniform-depth sphere. It does not establish mixed-depth LOD correctness; mixed-depth rendering is not implemented.
+
+## Vanilla resource validation
+
+The exact official 26.3 client JAR was verified against its pinned SHA-1 and embedded version. The importer resolved all 4,192 original model inheritance chains; 1,269 terminate in a built-in special-renderer root that the desktop renderer does not implement yet. Original names for Diamond Pickaxe, Stone and Zombie were read, and original diamond-pickaxe/zombie PNG byte hashes were checked through the importer. The source assets are not committed.
+
+Nine importer tests cover names, namespace defaults, model inheritance, unknown-field preservation, special-renderer roots, sprite-object metadata, alias and inheritance cycles, invalid resource IDs, unpinned input rejection, and separation of protocol/state IDs. One additional octree test verifies IDs above 65,535. The reports parser is tested with constructed fixtures; official generated-report provenance is not validated.
+
+The first Windows CI run exposed missing `advapi32` linkage in static SDL. `build.rs` now supplies it for Windows bundled-SDL builds. Check the latest workflow result for verification.
 
 ## Measurements, not guarantees
 

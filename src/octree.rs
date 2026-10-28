@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 pub const CHUNK_EDGE: usize = 16;
 pub const CHUNK_VOLUME: usize = CHUNK_EDGE * CHUNK_EDGE * CHUNK_EDGE;
-pub type BlockId = u16;
+/// Wide enough for vanilla global block-state IDs; demo IDs are not a vanilla registry.
+pub type BlockId = u32;
 pub const AIR: BlockId = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

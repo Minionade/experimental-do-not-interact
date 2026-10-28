@@ -52,6 +52,14 @@ Physics currently uses one `f64` inertial frame. Large-world precision tests cov
 
 The initial walker follows exact great-circle steps and parallel-transports its forward vector. It has no pole singularity and no six-face gravity switches. It is a mathematical surface controller, separate from Rapier. It does not yet walk inside structures, jump, collide with block geometry, or move between planets automatically. Free flight and a physical ship provide the initial surface/space inspection modes.
 
+## Vanilla resource boundary
+
+`ClientAssets` reads the pinned official 26.3 JAR in place. Names come from the original English translation table, blockstate and item-definition JSON remain intact, model parents and texture aliases resolve from original data, and PNG byte sequences are returned unchanged. Sprite objects retain metadata such as `force_translucent`. Built-in generated/entity model roots remain explicit renderer requirements.
+
+`RegistryReports` parses generated registry and block-state reports without deriving IDs from texture filenames. Protocol IDs, global block-state IDs and namespaced identities are distinct. Octree cells use 32-bit IDs. Schema validation does not establish report provenance or version; a verified report-generation harness is still needed.
+
+The importer is separate from the diagnostic renderer. Vanilla atlases, model baking, entity animation, behavior and gameplay are not yet implemented. Additional languages and sounds in external asset-index objects are also pending. Exact content and gameplay parity is the acceptance target; see `vanilla-parity.md`.
+
 ## Modding
 
 The TOML registry checks namespace ownership, duplicate registrations, supported API version, finite positive densities, and color ranges; a failed load changes nothing. It is not yet the authoritative material table for the desktop demo. Numeric IDs and persistent registry remapping require a stable save contract before arbitrary content becomes editable in game.
