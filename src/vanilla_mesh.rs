@@ -1,7 +1,7 @@
 //! CPU geometry for resolved vanilla element models, independent of GPU storage.
-//! Special renderers and element rotations are rejected, never approximated.
+//! Special renderers remain explicit; element geometry preserves original UVs.
 use crate::vanilla::{ResolvedModel, ResolvedTexture};
-use glam::Vec3;
+use glam::{Mat3, Vec3};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -16,6 +16,7 @@ pub struct ModelQuad {
     /// Counter-clockwise when viewed from outside; indices are 0,1,2,0,2,3.
     pub vertices: [ModelVertex; 4],
     pub normal: [f32; 3],
+    pub face_direction: String,
     pub texture: ResolvedTexture,
     pub cull_face: Option<String>,
     pub tint_index: Option<u32>,
@@ -39,18 +40,74 @@ fn numbers<const N: usize>(value: &Value) -> Result<[f32; N], String> {
     Ok(result)
 }
 
-/// Bake axis-aligned elements in block units, keeping each sprite's UVs separate.
+fn element_transform(element: &Value) -> Result<(Vec3, Mat3), String> {
+    let Some(rotation) = element.get("rotation") else {
+        return Ok((Vec3::ZERO, Mat3::IDENTITY));
+    };
+    let origin = Vec3::from_array(numbers::<3>(&rotation["origin"])?);
+    let rescale = rotation
+        .get("rescale")
+        .map(|v| v.as_bool().ok_or("rescale must be boolean"))
+        .transpose()?
+        .unwrap_or(false);
+    let finite_angle = |value: &Value| -> Result<f32, String> {
+        let angle = value.as_f64().ok_or("rotation needs numeric angle")? as f32;
+        if !angle.is_finite() {
+            return Err("non-finite rotation".into());
+        }
+        Ok(angle.rem_euclid(360.).to_radians())
+    };
+    if rotation.get("axis").is_none() && rotation.get("angle").is_none() {
+        if rescale {
+            return Err("multi-axis rescale not implemented".into());
+        }
+        let angle = |key: &str| {
+            rotation
+                .get(key)
+                .map(finite_angle)
+                .transpose()
+                .map(|a| a.unwrap_or(0.))
+        };
+        return Ok((
+            origin,
+            Mat3::from_rotation_z(angle("z")?)
+                * Mat3::from_rotation_y(angle("y")?)
+                * Mat3::from_rotation_x(angle("x")?),
+        ));
+    }
+    let angle = finite_angle(&rotation["angle"])?;
+    if rescale
+        && ![-45., -22.5, 0., 22.5, 45.].contains(&(rotation["angle"].as_f64().unwrap() as f32))
+    {
+        return Err("rescale for this angle not implemented".into());
+    }
+    let axis = match rotation["axis"].as_str() {
+        Some("x") => Vec3::X,
+        Some("y") => Vec3::Y,
+        Some("z") => Vec3::Z,
+        _ => return Err("rotation needs x, y or z axis".into()),
+    };
+    let scale = if rescale {
+        axis + (Vec3::ONE - axis) / angle.cos()
+    } else {
+        Vec3::ONE
+    };
+    Ok((
+        origin,
+        Mat3::from_axis_angle(axis, angle) * Mat3::from_diagonal(scale),
+    ))
+}
+
+/// Bake elements in block units, keeping each sprite's UVs separate.
 /// UVs are normalized to a single sprite, with V increasing down the source PNG.
-/// Blockstate transforms, UV-lock, atlas placement, tint and lighting are later stages.
+/// Blockstate transforms and UV-lock live in `blockstate`; atlas, tint and lighting are later stages.
 pub fn bake_model(model: &ResolvedModel) -> Result<Vec<ModelQuad>, String> {
     if let Some(parent) = &model.builtin_parent {
         return Err(format!("special model renderer not implemented: {parent}"));
     }
     let mut quads = Vec::new();
     for element in model.elements.as_deref().unwrap_or_default() {
-        if element.get("rotation").is_some() {
-            return Err("element rotation not implemented".into());
-        }
+        let (origin, transform) = element_transform(element)?;
         let [x0, y0, z0] = numbers::<3>(&element["from"])?;
         let [x1, y1, z1] = numbers::<3>(&element["to"])?;
         if x0 > x1 || y0 > y1 || z0 > z1 {
@@ -129,16 +186,19 @@ pub fn bake_model(model: &ResolvedModel) -> Result<Vec<ModelQuad>, String> {
                 [uv[2], uv[1]],
             ];
             let vertices = std::array::from_fn(|i| ModelVertex {
-                position: positions[i].map(|v| v / 16.),
+                position: ((origin + transform * (Vec3::from_array(positions[i]) - origin)) / 16.)
+                    .to_array(),
                 uv: coords[(i + rotation as usize / 90) % 4].map(|v| v / 16.),
             });
-            let normal = (Vec3::from_array(positions[1]) - Vec3::from_array(positions[0]))
-                .cross(Vec3::from_array(positions[2]) - Vec3::from_array(positions[0]))
-                .normalize_or_zero()
-                .to_array();
+            let normal = (Vec3::from_array(vertices[1].position)
+                - Vec3::from_array(vertices[0].position))
+            .cross(Vec3::from_array(vertices[2].position) - Vec3::from_array(vertices[0].position))
+            .normalize_or_zero()
+            .to_array();
             quads.push(ModelQuad {
                 vertices,
                 normal,
+                face_direction: direction.clone(),
                 texture,
                 cull_face,
                 tint_index,
@@ -205,6 +265,41 @@ mod tests {
         let rotated = bake_model(&model).unwrap();
         assert_eq!(rotated[0].vertices[0].uv, plain[0].vertices[1].uv);
     }
+    #[test]
+    fn element_rotation_rescales_around_declared_origin() {
+        let mut model = cube();
+        model.elements.as_mut().unwrap()[0]["rotation"] =
+            json!({"axis":"z","angle":45,"origin":[8,8,8],"rescale":true});
+        let quads = bake_model(&model).unwrap();
+        let north = quads.iter().find(|q| q.face_direction == "north").unwrap();
+        // Original (16,16,0) rotates to (8,24,0) with sqrt(2) perpendicular rescale.
+        assert!(
+            (Vec3::from_array(north.vertices[0].position) - Vec3::new(0.5, 1.5, 0.)).length()
+                < 1e-6
+        );
+        let east = quads.iter().find(|q| q.face_direction == "east").unwrap();
+        assert!(
+            (Vec3::from_array(east.normal) - Vec3::new(1., 1., 0.).normalize()).length() < 1e-6
+        );
+        for q in quads {
+            assert!((Vec3::from_array(q.normal).length() - 1.).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn multi_axis_rotation_order_and_legacy_precedence() {
+        let e = json!({"rotation":{"origin":[0,0,0],"x":90,"y":90,"z":90}});
+        let (_, r) = element_transform(&e).unwrap();
+        assert!((r * Vec3::Y - Vec3::Y).length() < 1e-6);
+        let e = json!({"rotation":{"origin":[0,0,0],"axis":"y","angle":-67.5,"x":90}});
+        let (_, r) = element_transform(&e).unwrap();
+        assert!((r * Vec3::Y - Vec3::Y).length() < 1e-6);
+        assert!(
+            (r * Vec3::X - Mat3::from_rotation_y((-67.5f32).to_radians()) * Vec3::X).length()
+                < 1e-6
+        );
+    }
+
     #[test]
     fn unsupported_and_malformed_models_fail_closed() {
         let mut model = cube();

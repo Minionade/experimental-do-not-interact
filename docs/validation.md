@@ -55,3 +55,25 @@ six quads with the original face PNGs; its screenshot was visually inspected.
 This verifies a diagnostic asset path, not vanilla gameplay or final lighting parity.
 The preceding foundation commit passed Windows and Linux CI, including Linux render
 smoke testing; the new preview is included in both platform artifact manifests.
+
+## Blockstate dispatch and element rotations
+
+43 tests pass locally, along with formatting and default-feature Clippy. New coverage
+includes weighted-choice boundaries, property matching, nested multipart logic,
+ambiguous/missing states, element rotation origins/rescale, multi-axis rotation order,
+and UV-lock plus transformed cull directions across all 64 X/Y/Z quarter-turn combinations.
+
+Three-frame OpenGL previews using the verified original client were visually inspected:
+
+- East-facing lit furnace: 6 quads, correctly oriented lit front.
+- Oak fence connected north/east: 26 quads from the post and two side models.
+- South-facing wall torch: 6 quads with element tilt.
+- East-facing bottom outer-left oak stairs: 11 quads.
+
+The rotation format/order follows the official [1.21.11 technical notes](https://feedback.minecraft.net/hc/en-us/articles/41809981427213-Minecraft-Java-Edition-1-21-11-Mounts-of-Mayhem)
+and the actual pinned 26.3 client models, including arbitrary single-axis angles and
+multi-axis hanging-sign elements. Legacy axis/angle fields take precedence. Element
+rotation leaves nominal face/cull directions intact; blockstate rotation transforms them.
+Rescale is implemented for legacy 0/22.5/45-degree single-axis cases; other rescale
+combinations fail explicitly pending verification. These tests do not certify pixel parity,
+lighting, tinted/animated sprites, or vanilla position-seeded weighted randomness.

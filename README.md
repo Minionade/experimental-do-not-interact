@@ -71,22 +71,32 @@ Surface walking follows a great circle with a continuously changing local up vec
 
 ## Original model preview
 
-The separate diagnostic viewer now renders axis-aligned vanilla element models with
+The separate diagnostic viewer now renders vanilla element models with
 original PNGs from your hash-verified 26.3 client JAR:
 
 ```sh
-cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --model minecraft:block/crafting_table
+cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --block minecraft:furnace --state facing=east,lit=true
 cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --model minecraft:block/stone --frames 3 --screenshot stone.png
 cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --bake-model minecraft:block/crafting_table
 ```
 
 Escape closes the preview. The audit command prints baked geometry, normalized UVs,
 and original texture references after checking every referenced PNG exists.
-The viewer uses nearest-neighbor sampling and unlit colors. It is separate from the
-planet demo: blockstate selection/rotation, UV-lock, biome tint, animation, lighting,
-translucent sorting, rotated elements, generated items and entity renderers remain
-unfinished. Unsupported special models and rotated elements produce an explicit
-error. Non-square textures are rejected by the viewer instead of stretched.
+The viewer supports variant/property selection, weighted choices, multipart conditions,
+X/Y/Z blockstate rotations, UV-lock, and single/multi-axis element rotations. For example:
+
+```sh
+cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --block minecraft:oak_fence --state north=true,east=true,south=false,west=false,waterlogged=false
+cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --block minecraft:wall_torch --state facing=south
+```
+
+Supply complete registry-valid properties with `--state`; this command does not
+infer defaults or validate the entire property domain. `--ticket N` chooses a weighted
+model deterministically; vanilla's position-seeded random sequence is not implemented.
+The viewer uses nearest-neighbor sampling and unlit colors. It remains separate from
+the planet demo. Biome tint, animation, lighting, translucent sorting, generated items,
+and entity renderers remain unfinished. Special renderers and unverified rescale
+combinations produce explicit errors. Non-square textures are rejected rather than stretched.
 Minecraft assets remain in your local client JAR and are not bundled with the build.
 
 ## Verify

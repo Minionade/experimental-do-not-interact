@@ -7,3 +7,5 @@ pub mod physics;
 pub mod planet;
 pub mod vanilla;
 pub mod vanilla_mesh;
+
+pub mod blockstate;

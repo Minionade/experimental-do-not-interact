@@ -16,13 +16,29 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let mut jar = None;
-    let mut model = ResourceId::parse("minecraft:block/stone")?;
+    let mut model = None;
+    let mut block = None;
+    let mut properties = orbital_voxel::blockstate::Properties::new();
+    let mut ticket = 0u64;
     let mut frames = None;
     let mut screenshot = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--minecraft-jar" => jar = Some(PathBuf::from(args.next().ok_or("missing JAR path")?)),
-            "--model" => model = ResourceId::parse(&args.next().ok_or("missing model ID")?)?,
+            "--model" => model = Some(ResourceId::parse(&args.next().ok_or("missing model ID")?)?),
+            "--block" => block = Some(ResourceId::parse(&args.next().ok_or("missing block ID")?)?),
+            "--state" => {
+                properties = orbital_voxel::blockstate::parse_properties(
+                    &args.next().ok_or("missing properties")?,
+                )?
+            }
+            "--ticket" => {
+                ticket = args
+                    .next()
+                    .ok_or("missing ticket")?
+                    .parse::<u64>()
+                    .map_err(|e| e.to_string())?
+            }
             "--frames" => {
                 frames = Some(
                     args.next()
@@ -35,7 +51,7 @@ fn run() -> Result<(), String> {
                 screenshot = Some(PathBuf::from(args.next().ok_or("missing screenshot path")?))
             }
             "--help" | "-h" => {
-                println!("vanilla-preview --minecraft-jar FILE [--model minecraft:block/stone] [--frames N] [--screenshot FILE.png]\nUnlit diagnostic preview, not gameplay. No tint, animation, blockstate transforms, rotated elements or special renderers.");
+                println!("vanilla-preview --minecraft-jar FILE [--model minecraft:block/stone | --block minecraft:furnace --state facing=east,lit=true] [--ticket N] [--frames N] [--screenshot FILE.png]\nUnlit diagnostic preview, not gameplay. No tint, animation or special renderers. Ticket controls weighted choice; vanilla position RNG is not implemented.");
                 return Ok(());
             }
             _ => return Err(format!("unknown argument {arg}")),
@@ -45,7 +61,24 @@ fn run() -> Result<(), String> {
         return Err("frame count must be positive".into());
     }
     let mut assets = ClientAssets::open(&jar.ok_or("--minecraft-jar is required")?)?;
-    let quads = bake_model(&assets.resolve_model(&model)?)?;
+    if model.is_some() && block.is_some() {
+        return Err("use --model or --block, not both".into());
+    }
+    if block.is_none() && !properties.is_empty() {
+        return Err("--state requires --block".into());
+    }
+    let (label, quads) = if let Some(block) = block {
+        let definition = assets.blockstate(&block)?;
+        let choices = orbital_voxel::blockstate::select(&definition, &properties, || ticket)?;
+        let mut quads = Vec::new();
+        for choice in &choices {
+            quads.extend(orbital_voxel::blockstate::bake_choice(&mut assets, choice)?);
+        }
+        (format!("{} {:?}", block.key(), properties), quads)
+    } else {
+        let model = model.unwrap_or(ResourceId::parse("minecraft:block/stone")?);
+        (model.key(), bake_model(&assets.resolve_model(&model)?)?)
+    };
     if quads.is_empty() {
         return Err("model has no element faces".into());
     }
@@ -56,11 +89,7 @@ fn run() -> Result<(), String> {
     attr.set_context_version(3, 3);
     attr.set_depth_size(24);
     let window = video
-        .window(
-            &format!("{} — original asset preview", model.key()),
-            640,
-            640,
-        )
+        .window(&format!("{} — original asset preview", label), 640, 640)
         .opengl()
         .build()
         .map_err(|e| e.to_string())?;
@@ -246,7 +275,7 @@ fn run() -> Result<(), String> {
     }
     println!(
         "Rendered {}: {} quads using original PNGs",
-        model.key(),
+        label,
         quads.len()
     );
     Ok(())
