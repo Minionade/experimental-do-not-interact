@@ -43,3 +43,15 @@ One release-mode depth-3 terrain run generated 128 surface meshes containing 258
 - Shaderpack compatibility, which is outside the current requirements.
 
 GitHub Actions builds Linux and Windows desktop targets and runs a Linux render smoke test. Consult the actual workflow result; the presence of a workflow file alone is not a successful build.
+
+## Vanilla element geometry and original-texture preview
+
+The next stage adds three geometry tests (36 total tests): all six cube faces wind
+outward, partial-element default UVs and quarter-turn UV rotation are preserved,
+and special/rotated/malformed models fail explicitly. Sprite metadata survives baking.
+Local default-feature Clippy passes with warnings denied. A three-frame OpenGL
+preview of `minecraft:block/crafting_table` from the pinned official client renders
+six quads with the original face PNGs; its screenshot was visually inspected.
+This verifies a diagnostic asset path, not vanilla gameplay or final lighting parity.
+The preceding foundation commit passed Windows and Linux CI, including Linux render
+smoke testing; the new preview is included in both platform artifact manifests.

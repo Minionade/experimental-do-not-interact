@@ -26,14 +26,13 @@ fn run() -> Result<(), String> {
                 ))
             }
             "--audit-models" => audit = true,
-            "--inspect-item" | "--inspect-block" | "--inspect-entity" | "--inspect-texture" => {
-                inspections.push((
-                    arg,
-                    ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
-                ))
-            }
+            "--inspect-item" | "--inspect-block" | "--inspect-entity" | "--inspect-texture"
+            | "--bake-model" => inspections.push((
+                arg,
+                ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
+            )),
             "--help" | "-h" => {
-                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--reports DIR]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
+                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}; use --help")),
@@ -58,6 +57,26 @@ fn run() -> Result<(), String> {
     }
     for (kind, id) in inspections {
         match kind.as_str() {
+            "--bake-model" => {
+                let model = assets.resolve_model(&id)?;
+                let quads = orbital_voxel::vanilla_mesh::bake_model(&model)?;
+                // Verify every referenced original PNG exists before reporting success.
+                let textures: std::collections::BTreeSet<_> =
+                    quads.iter().map(|q| q.texture.sprite.clone()).collect();
+                for texture in &textures {
+                    assets.texture_png(texture)?;
+                }
+                println!(
+                    "Baked {}: {} quads, {} original textures",
+                    id.key(),
+                    quads.len(),
+                    textures.len()
+                );
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&quads).map_err(|e| e.to_string())?
+                );
+            }
             "--inspect-item" => {
                 println!("{} = {}", id.key(), assets.display_name("item", &id)?);
                 let definition = assets.item_definition(&id)?;

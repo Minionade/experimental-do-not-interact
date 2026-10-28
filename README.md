@@ -69,6 +69,26 @@ Surface walking follows a great circle with a continuously changing local up vec
 - Validated TOML block definitions and a compiled-in Rust mod event/command API. Native mods can issue acceleration commands during fixed ticks; [the working example](examples/flight_mod.rs) demonstrates this. The TOML registry is groundwork and is not yet wired to the demo's hard-coded block palette or density.
 - Engine-owned GLSL terrain and post-processing shaders, compiled and validated by the OpenGL driver.
 
+## Original model preview
+
+The separate diagnostic viewer now renders axis-aligned vanilla element models with
+original PNGs from your hash-verified 26.3 client JAR:
+
+```sh
+cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --model minecraft:block/crafting_table
+cargo run --locked --bin vanilla-preview -- --minecraft-jar /path/to/26.3.jar --model minecraft:block/stone --frames 3 --screenshot stone.png
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --bake-model minecraft:block/crafting_table
+```
+
+Escape closes the preview. The audit command prints baked geometry, normalized UVs,
+and original texture references after checking every referenced PNG exists.
+The viewer uses nearest-neighbor sampling and unlit colors. It is separate from the
+planet demo: blockstate selection/rotation, UV-lock, biome tint, animation, lighting,
+translucent sorting, rotated elements, generated items and entity renderers remain
+unfinished. Unsupported special models and rotated elements produce an explicit
+error. Non-square textures are rejected by the viewer instead of stretched.
+Minecraft assets remain in your local client JAR and are not bundled with the build.
+
 ## Verify
 
 ```sh

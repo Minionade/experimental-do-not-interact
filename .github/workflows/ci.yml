@@ -44,5 +44,7 @@ jobs:
             target/release/orbital-voxel.exe
             target/release/vanilla-audit
             target/release/vanilla-audit.exe
+            target/release/vanilla-preview
+            target/release/vanilla-preview.exe
             examples/mods/
             README.md

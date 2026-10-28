@@ -31,3 +31,7 @@ codegen-units = 1
 [[bin]]
 name = "orbital-voxel"
 path = "src/main.rs"
+[[bin]]
+name = "vanilla-preview"
+path = "src/bin/vanilla-preview.rs"
+required-features = ["desktop"]
