@@ -1,0 +1,30 @@
+[package]
+name = "orbital-voxel"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental octree voxel planets, native rendering and rigid-body physics"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:sdl2", "dep:glow", "dep:png"]
+bundled-sdl = ["desktop", "sdl2/bundled", "sdl2/static-link"]
+
+[dependencies]
+glam = { version = "0.29", features = ["serde", "bytemuck"] }
+rapier3d-f64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rayon = "1.10"
+bytemuck = { version = "1", features = ["derive"] }
+sdl2 = { version = "0.37", optional = true }
+glow = { version = "0.16", optional = true }
+png = { version = "0.17", optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[[bin]]
+name = "orbital-voxel"
+path = "src/main.rs"

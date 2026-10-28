@@ -1,0 +1,4 @@
+[env]
+# SDL2's bundled build declares an older CMake policy baseline.
+# CMake 4 removed compatibility below 3.5; leave caller overrides intact.
+CMAKE_POLICY_VERSION_MINIMUM = { value = "3.5", force = false }
