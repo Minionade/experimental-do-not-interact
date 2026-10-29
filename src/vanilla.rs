@@ -20,6 +20,7 @@ pub struct VanillaTarget {
     pub asset_index_id: String,
     pub asset_index_sha1: String,
     pub reports_sha1: BTreeMap<String, String>,
+    pub item_components_sha1: String,
 }
 impl VanillaTarget {
     pub fn pinned() -> Self {

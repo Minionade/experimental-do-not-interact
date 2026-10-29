@@ -104,3 +104,14 @@ saved world and meshing again is checked independently. The renderer uses chunk-
 coordinates, camera-relative transforms, conservative occlusion and dirty-chunk VBO
 replacement. Translucency sorting is currently at batch granularity; intersecting
 translucent faces and full vanilla shading remain parity gaps.
+
+## Item component and inventory foundation
+
+The 1,658 default item-component reports are verified with one ordered aggregate
+SHA-1 (item ID, zero separator, little-endian byte length, exact report bytes).
+Original components—including tool rules, damage, food and names—remain available
+without renaming or replacing them. Inventory operations enforce effective stack
+limits, merge only equal effective components, split without loss, and keep air as
+an empty slot. Durability consumption reports breakage to the caller; enchantment
+probabilities and survival integration remain unfinished. Added tests cover item
+conservation, component-aware merging, stack limits and durability boundaries.

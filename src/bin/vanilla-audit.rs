@@ -49,6 +49,7 @@ fn run() -> Result<(), String> {
         let (total, special) = assets.audit_models()?;
         println!("Resolved {total} model inheritance chains; {special} require a built-in special renderer (not implemented).");
     }
+    let report_directory = reports.clone();
     let reports = reports
         .map(|path| {
             if pinned_reports {
@@ -69,6 +70,20 @@ fn run() -> Result<(), String> {
             } else {
                 "Report provenance not verified."
             }
+        );
+    }
+    let items = if pinned_reports {
+        Some(orbital_voxel::items::ItemCatalog::load_pinned(
+            reports.as_ref().ok_or("missing reports")?,
+            report_directory.as_ref().unwrap(),
+        )?)
+    } else {
+        None
+    };
+    if let Some(items) = &items {
+        println!(
+            "Verified {} original item component definitions",
+            items.len()
         );
     }
     for (kind, id) in inspections {
@@ -95,6 +110,15 @@ fn run() -> Result<(), String> {
             }
             "--inspect-item" => {
                 println!("{} = {}", id.key(), assets.display_name("item", &id)?);
+                if let Some(items) = &items {
+                    println!(
+                        "Original item components: {}",
+                        serde_json::to_string_pretty(
+                            &items.get(&id.key()).ok_or("unregistered item")?.components
+                        )
+                        .map_err(|e| e.to_string())?
+                    );
+                }
                 let definition = assets.item_definition(&id)?;
                 println!(
                     "Item definition: {}",

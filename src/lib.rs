@@ -21,3 +21,5 @@ pub mod world_mesh;
 pub mod block_desktop;
 #[cfg(feature = "desktop")]
 pub mod textured_renderer;
+
+pub mod items;

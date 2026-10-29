@@ -27,6 +27,17 @@ def main():
     for name, expected in pin["reports_sha1"].items():
         if hashlib.sha1((output / "reports" / name).read_bytes()).hexdigest() != expected:
             raise SystemExit(f"Generated {name} does not match the pinned report hash")
+    registry = json.loads((output / "reports/registries.json").read_text())
+    digest = hashlib.sha1()
+    for name in sorted(registry["minecraft:item"]["entries"]):
+        namespace, item = name.split(":", 1)
+        data = (output / "reports" / namespace / "components/item" / f"{item}.json").read_bytes()
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(len(data).to_bytes(8, "little"))
+        digest.update(data)
+    if digest.hexdigest() != pin["item_components_sha1"]:
+        raise SystemExit("Generated item components do not match the pinned aggregate hash")
     print(f"Verified {pin['version']} reports: {output / 'reports'}")
 
 
