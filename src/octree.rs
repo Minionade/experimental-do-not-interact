@@ -175,6 +175,47 @@ impl BlockOctree {
         self.root.write(p - self.min, self.size, value);
         Ok(())
     }
+    pub fn origin(&self) -> IVec3 {
+        self.min
+    }
+    /// Populated brick or uniform regions; skips empty branches without dense scanning.
+    pub fn visit_nonempty_regions(&self, mut visit: impl FnMut(IVec3, i32)) {
+        fn walk(node: &Node, min: IVec3, size: i32, visit: &mut impl FnMut(IVec3, i32)) {
+            match node {
+                Node::Uniform(AIR) => {}
+                Node::Branch(children) => {
+                    for (i, child) in children.iter().enumerate() {
+                        let offset = IVec3::new(
+                            (i & 1) as i32,
+                            ((i >> 1) & 1) as i32,
+                            ((i >> 2) & 1) as i32,
+                        ) * (size / 2);
+                        walk(child, min + offset, size / 2, visit);
+                    }
+                }
+                _ => visit(min, size),
+            }
+        }
+        walk(&self.root, self.min, self.size, &mut visit);
+    }
+    pub fn visit_ids(&self, mut visit: impl FnMut(BlockId)) {
+        fn walk(node: &Node, visit: &mut impl FnMut(BlockId)) {
+            match node {
+                Node::Uniform(id) => visit(*id),
+                Node::Brick(b) => {
+                    for &id in &b.cells {
+                        visit(id);
+                    }
+                }
+                Node::Branch(c) => {
+                    for n in c.iter() {
+                        walk(n, visit);
+                    }
+                }
+            }
+        }
+        walk(&self.root, &mut visit);
+    }
     pub fn node_count(&self) -> usize {
         self.root.count()
     }

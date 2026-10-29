@@ -19,6 +19,7 @@ pub struct VanillaTarget {
     pub client_size: u64,
     pub asset_index_id: String,
     pub asset_index_sha1: String,
+    pub reports_sha1: BTreeMap<String, String>,
 }
 impl VanillaTarget {
     pub fn pinned() -> Self {
@@ -356,6 +357,29 @@ pub struct RegistryReports {
     pub items: Option<Value>,
 }
 impl RegistryReports {
+    /// Exact hashes generated from the pinned official server.
+    pub fn load_pinned(directory: &Path) -> Result<Self, String> {
+        let target = VanillaTarget::pinned();
+        let read = |name: &str| -> Result<Value, String> {
+            let path = directory.join(name);
+            let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if file.metadata().map_err(|e| e.to_string())?.len() > 128 * 1024 * 1024 {
+                return Err("report exceeds size limit".into());
+            }
+            let mut bytes = Vec::new();
+            file.take(128 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if target.reports_sha1.get(name) != Some(&format!("{:x}", Sha1::digest(&bytes))) {
+                return Err(format!(
+                    "{name} differs from pinned {} report",
+                    target.version
+                ));
+            }
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        };
+        Self::validate(read("registries.json")?, read("blocks.json")?, None)
+    }
     pub fn load(directory: &Path) -> Result<Self, String> {
         let read = |name: &str| -> Result<Value, String> {
             let p = directory.join(name);

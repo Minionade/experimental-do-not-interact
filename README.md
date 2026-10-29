@@ -118,3 +118,17 @@ A graphics-free CI job runs the core tests. Desktop CI builds for Windows and Li
 - [Minecraft 26.3 parity and implementation roadmap](docs/roadmap.md)
 
 The code and procedural visual assets in this repository are original project work. Third-party libraries are declared in Cargo manifests. Sable is a functional reference; no Sable source code is copied into this prototype.
+
+## Generate exact registry reports
+
+Use your official 26.3 server JAR and Java 25 (Python 3 is needed only for this helper):
+
+```sh
+python tools/generate_reports.py --server-jar /path/to/server.jar --java /path/to/java --output /path/to/generated
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports
+```
+
+The helper verifies the server JAR before execution and verifies the generated
+block/registry report hashes afterward. `--pinned-reports` imports all 35,723 global
+states from those exact reports. The existing `--reports` flag remains a schema-only
+inspection mode. No game JARs or generated report payloads are distributed here.

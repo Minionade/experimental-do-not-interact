@@ -11,6 +11,7 @@ fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let mut jar = None;
     let mut reports = None;
+    let mut pinned_reports = false;
     let mut audit = false;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
@@ -20,7 +21,8 @@ fn run() -> Result<(), String> {
                     args.next().ok_or("--minecraft-jar needs a path")?,
                 ))
             }
-            "--reports" => {
+            "--reports" | "--pinned-reports" => {
+                pinned_reports = arg == "--pinned-reports";
                 reports = Some(PathBuf::from(
                     args.next().ok_or("--reports needs a directory")?,
                 ))
@@ -32,7 +34,7 @@ fn run() -> Result<(), String> {
                 ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
             )),
             "--help" | "-h" => {
-                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
+                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}; use --help")),
@@ -48,11 +50,25 @@ fn run() -> Result<(), String> {
         println!("Resolved {total} model inheritance chains; {special} require a built-in special renderer (not implemented).");
     }
     let reports = reports
-        .map(|path| RegistryReports::load(&path))
+        .map(|path| {
+            if pinned_reports {
+                RegistryReports::load_pinned(&path)
+            } else {
+                RegistryReports::load(&path)
+            }
+        })
         .transpose()?;
-    if reports.is_some() {
+    if let Some(reports) = &reports {
+        let registry = orbital_voxel::state_registry::StateRegistry::from_reports(reports)?;
         println!(
-            "Report schemas validated; report version/provenance is not certified by this parser."
+            "Loaded {} global states; fingerprint {}. {}",
+            registry.len(),
+            registry.fingerprint(),
+            if pinned_reports {
+                "Exact 26.3 report hashes verified."
+            } else {
+                "Report provenance not verified."
+            }
         );
     }
     for (kind, id) in inspections {

@@ -77,3 +77,18 @@ rotation leaves nominal face/cull directions intact; blockstate rotation transfo
 Rescale is implemented for legacy 0/22.5/45-degree single-axis cases; other rescale
 combinations fail explicitly pending verification. These tests do not certify pixel parity,
 lighting, tinted/animated sprites, or vanilla position-seeded weighted randomness.
+
+## Authoritative registry and editable-world storage
+
+The Java 25 data generator from the SHA-1-pinned official 26.3 server produced
+1,286 registered blocks, 35,723 global block states, 1,658 items, and 161 entity
+types. Independently repeated report generation produced identical blocks.json
+and registries.json hashes, now pinned in config/minecraft-26.3.json. These counts
+are registry counts, unlike the earlier resource-file counts.
+
+`StateRegistry` validates property domains/combinations and resolves overrides
+against authoritative defaults. `BlockWorld` stores those IDs in the cubic octree,
+invalidates neighboring chunks at edited boundaries, supports voxel ray queries,
+and rejects saves with mismatched version/registry fingerprints. Dense active-chunk
+enumeration is budgeted. This is storage/edit infrastructure, not block behavior parity.
+49 tests pass, including negative coordinates, ray edge ties, and save identity.

@@ -9,3 +9,7 @@ pub mod vanilla;
 pub mod vanilla_mesh;
 
 pub mod blockstate;
+
+pub mod state_registry;
+
+pub mod block_world;

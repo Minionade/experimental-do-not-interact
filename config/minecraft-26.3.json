@@ -10,6 +10,16 @@
   "java_major_version": 25,
   "world_version": 5023,
   "protocol_version": 777,
-  "resource_pack_version": [97, 1],
-  "data_pack_version": [121, 0]
+  "resource_pack_version": [
+    97,
+    1
+  ],
+  "data_pack_version": [
+    121,
+    0
+  ],
+  "reports_sha1": {
+    "blocks.json": "91d30c3a9dd67ccaf498cb6d9d9abdb0fe0a8d38",
+    "registries.json": "8b707c5e9239d22f129f35973a83958234689b59"
+  }
 }
