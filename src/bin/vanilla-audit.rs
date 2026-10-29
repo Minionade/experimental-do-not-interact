@@ -13,6 +13,9 @@ fn run() -> Result<(), String> {
     let mut reports = None;
     let mut pinned_reports = false;
     let mut audit = false;
+    let mut audit_recipes = false;
+    let mut craft_grid = None;
+    let mut recipe_id = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -28,13 +31,20 @@ fn run() -> Result<(), String> {
                 ))
             }
             "--audit-models" => audit = true,
+            "--audit-recipes" => audit_recipes = true,
+            "--craft-grid" => {
+                craft_grid = Some(PathBuf::from(
+                    args.next().ok_or("--craft-grid needs JSON path")?,
+                ))
+            }
+            "--recipe" => recipe_id = Some(args.next().ok_or("--recipe needs ID")?),
             "--inspect-item" | "--inspect-block" | "--inspect-entity" | "--inspect-texture"
             | "--bake-model" => inspections.push((
                 arg,
                 ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
             )),
             "--help" | "-h" => {
-                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
+                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}; use --help")),
@@ -85,6 +95,36 @@ fn run() -> Result<(), String> {
             "Verified {} original item component definitions",
             items.len()
         );
+    }
+    if audit_recipes || craft_grid.is_some() {
+        let items = items
+            .as_ref()
+            .ok_or("recipe operations require --pinned-reports")?;
+        let tags = orbital_voxel::crafting::ItemTags::load(&mut assets, items)?;
+        let book = orbital_voxel::crafting::RecipeBook::load(&mut assets, &tags, items)?;
+        println!("Loaded {} item tags, {} ordinary crafting recipes, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.cooking.len(),book.unsupported.len());
+        if let Some(path) = craft_grid {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            if file.metadata().map_err(|e| e.to_string())?.len() > 1024 * 1024 {
+                return Err("craft grid exceeds size limit".into());
+            }
+            let mut grid: orbital_voxel::crafting::CraftingGrid =
+                serde_json::from_reader(file).map_err(|e| e.to_string())?;
+            let recipe = recipe_id
+                .or(book.find_crafting(&grid, items)?.map(str::to_string))
+                .ok_or("no ordinary recipe matches grid")?;
+            let mut inventory = orbital_voxel::items::Inventory::new(36)?;
+            if !book.craft_into(&recipe, &mut grid, &mut inventory, items)? {
+                return Err("recipe did not craft".into());
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"recipe":recipe,"grid":grid,"inventory":inventory})
+                )
+                .map_err(|e| e.to_string())?
+            );
+        }
     }
     for (kind, id) in inspections {
         match kind.as_str() {

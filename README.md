@@ -158,3 +158,18 @@ The original spherical-planet mode remains available by omitting the asset argum
 For repeatable asset-world checks, add `--frames 3 --screenshot world.png`, or
 `--headless --world-save check.json` to validate CPU meshing and save round-tripping
 (the asset-world path currently uses the default desktop build even when headless).
+
+## Crafting backend validation
+
+```sh
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --audit-recipes
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --craft-grid examples/crafting/iron_pickaxe.json --recipe minecraft:iron_pickaxe
+```
+
+The recipe backend loads original tags and shaped/shapeless recipes, including
+mirroring, offsets and alternative ingredients. Crafting into an inventory is
+transactional: output and container remainders must fit before inputs are consumed.
+The audit prints the resulting grid and inventory. These are backend operations;
+the desktop crafting interface and survival loop are not wired up yet. Cooking
+recipes are parsed with original time/experience values but are not simulated yet.
+Special recipe types are retained and counted explicitly rather than approximated.

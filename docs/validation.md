@@ -115,3 +115,15 @@ limits, merge only equal effective components, split without loss, and keep air 
 an empty slot. Durability consumption reports breakage to the caller; enchantment
 probabilities and survival integration remain unfinished. Added tests cover item
 conservation, component-aware merging, stack limits and durability boundaries.
+
+## Ordinary recipe execution
+
+60 tests pass with formatting and Clippy clean. The exact client data loads 236 item
+tags, 1,202 ordinary shaped/shapeless recipes and 116 cooking recipes. Another 724
+recipes require specialized handlers and are retained without execution. Ingredient
+matching uses complete assignment for overlapping shapeless alternatives. Tests cover
+mirroring/offsets, surplus inputs, recursive tag cycles, full output inventories and
+container remainders. End-to-end runs crafted an Iron Pickaxe and Cake from the original
+recipes: the former consumed one item per occupied slot, and the latter returned all
+three buckets. No cooking simulation, special crafting, recipe unlocks, or GUI parity
+is claimed by these backend checks.

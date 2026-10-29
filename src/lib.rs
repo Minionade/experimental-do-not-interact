@@ -23,3 +23,5 @@ pub mod block_desktop;
 pub mod textured_renderer;
 
 pub mod items;
+
+pub mod crafting;

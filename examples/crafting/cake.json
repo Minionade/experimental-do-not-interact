@@ -1,0 +1,42 @@
+{
+  "width": 3,
+  "height": 3,
+  "slots": [
+    {
+      "item": "minecraft:milk_bucket",
+      "count": 1
+    },
+    {
+      "item": "minecraft:milk_bucket",
+      "count": 1
+    },
+    {
+      "item": "minecraft:milk_bucket",
+      "count": 1
+    },
+    {
+      "item": "minecraft:sugar",
+      "count": 1
+    },
+    {
+      "item": "minecraft:egg",
+      "count": 1
+    },
+    {
+      "item": "minecraft:sugar",
+      "count": 1
+    },
+    {
+      "item": "minecraft:wheat",
+      "count": 1
+    },
+    {
+      "item": "minecraft:wheat",
+      "count": 1
+    },
+    {
+      "item": "minecraft:wheat",
+      "count": 1
+    }
+  ]
+}
