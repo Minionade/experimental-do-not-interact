@@ -210,6 +210,14 @@ impl ClientAssets {
         }
         Ok(bytes)
     }
+    pub fn texture_metadata(&mut self, id: &ResourceId) -> Result<Option<Value>, String> {
+        let path = id.asset_path("textures", "png.mcmeta");
+        if self.paths.contains(&path) {
+            self.json(&path).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
     pub fn data_json(&mut self, directory: &str, id: &ResourceId) -> Result<Value, String> {
         ResourceId::parse(&format!("minecraft:{directory}"))?;
         self.json(&format!(

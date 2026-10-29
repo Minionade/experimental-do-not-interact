@@ -5,13 +5,13 @@ use glam::{Mat3, Vec3};
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ModelVertex {
     pub position: [f32; 3],
     pub uv: [f32; 2],
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ModelQuad {
     /// Counter-clockwise when viewed from outside; indices are 0,1,2,0,2,3.
     pub vertices: [ModelVertex; 4],

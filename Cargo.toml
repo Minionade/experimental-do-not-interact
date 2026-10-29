@@ -7,7 +7,7 @@ description = "Experimental octree voxel planets, native rendering and rigid-bod
 
 [features]
 default = ["desktop"]
-desktop = ["dep:sdl2", "dep:glow", "dep:png"]
+desktop = ["dep:sdl2", "dep:glow"]
 bundled-sdl = ["desktop", "sdl2/bundled", "sdl2/static-link"]
 
 [dependencies]
@@ -22,7 +22,7 @@ sha1 = "0.10"
 bytemuck = { version = "1", features = ["derive"] }
 sdl2 = { version = "0.37", optional = true }
 glow = { version = "0.16", optional = true }
-png = { version = "0.17", optional = true }
+png = "0.17"
 
 [profile.release]
 lto = "thin"

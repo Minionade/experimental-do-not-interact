@@ -92,3 +92,15 @@ invalidates neighboring chunks at edited boundaries, supports voxel ray queries,
 and rejects saves with mismatched version/registry fingerprints. Dense active-chunk
 enumeration is budgeted. This is storage/edit infrastructure, not block behavior parity.
 49 tests pass, including negative coordinates, ray edge ties, and save identity.
+
+## Original textures in editable cubic chunks
+
+53 tests pass, covering sprite timing/metadata and cross-chunk original-model face
+culling in addition to the registry, storage, physics and geometry checks. Both
+headless and default-feature Clippy pass with warnings denied. A real three-frame
+Mesa OpenGL run of the asset world rendered 8 chunks, 3,166 triangles, 10 shared
+original sprites and 22 draw calls; the frame was visually inspected. Loading the
+saved world and meshing again is checked independently. The renderer uses chunk-local
+coordinates, camera-relative transforms, conservative occlusion and dirty-chunk VBO
+replacement. Translucency sorting is currently at batch granularity; intersecting
+translucent faces and full vanilla shading remain parity gaps.

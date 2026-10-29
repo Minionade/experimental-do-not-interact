@@ -20,8 +20,25 @@ fn run() -> Result<(), String> {
     let mut frames = None;
     let mut screenshot = None;
     let mut save = None;
+    let (mut jar, mut reports, mut world_save, mut world_load) = (None, None, None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--minecraft-jar" => {
+                jar = Some(PathBuf::from(
+                    args.next().ok_or("--minecraft-jar needs path")?,
+                ))
+            }
+            "--reports" => {
+                reports = Some(PathBuf::from(
+                    args.next().ok_or("--reports needs directory")?,
+                ))
+            }
+            "--world-save" => {
+                world_save = Some(PathBuf::from(args.next().ok_or("--world-save needs path")?))
+            }
+            "--load-world" => {
+                world_load = Some(PathBuf::from(args.next().ok_or("--load-world needs path")?))
+            }
             "--headless" => headless = true,
             "--mesh-bench" => benchmark = true,
             "--frames" => {
@@ -47,7 +64,7 @@ fn run() -> Result<(), String> {
                 headless = true;
             }
             "--help" | "-h" => {
-                println!("Orbital Voxel — experimental Rust octree engine, not a complete Minecraft port.\n\nRun without flags for desktop.\n  --headless                 Validate planet traversal and simulate orbit\n  --mesh-bench               Generate and mesh an octree terrain cut\n  --frames N                Stop desktop rendering after N frames\n  --screenshot FILE.png      Capture the last frame (requires --frames)\n  --save-demo FILE.json      Save and reload an octree structure\n\nDesktop: click to capture mouse; WASD; Space/Ctrl; Shift; F walk/free; G ship; E spawn; Esc release/quit.");
+                println!("Orbital Voxel — experimental Rust octree engine, not a complete Minecraft port.\n\nRun without flags for planetary desktop.\n  --minecraft-jar FILE --reports DIR  Editable textured octree world\n  --world-save FILE --load-world FILE Save/load that world (F5 also saves).\n  --headless                 Validate planet traversal and simulate orbit\n  --mesh-bench               Generate and mesh an octree terrain cut\n  --frames N                Stop desktop rendering after N frames\n  --screenshot FILE.png      Capture the last frame (requires --frames)\n  --save-demo FILE.json      Save and reload an octree structure\n\nDesktop: click to capture mouse; WASD; Space/Ctrl; Shift; F walk/free; G ship; E spawn; Esc release/quit.");
                 return Ok(());
             }
             other => return Err(format!("unknown argument {other}; use --help")),
@@ -55,6 +72,26 @@ fn run() -> Result<(), String> {
     }
     if screenshot.is_some() && frames.is_none() {
         return Err("--screenshot requires --frames".into());
+    }
+    if let Some(jar) = jar {
+        #[cfg(feature = "desktop")]
+        return orbital_voxel::block_desktop::run(orbital_voxel::block_desktop::Options {
+            jar,
+            reports: reports.ok_or("--minecraft-jar requires --reports")?,
+            frames,
+            screenshot,
+            save: world_save,
+            load: world_load,
+            headless,
+        });
+        #[cfg(not(feature = "desktop"))]
+        {
+            let _ = (jar, reports, world_save, world_load);
+            return Err("asset world currently requires the desktop feature, including headless mesh validation".into());
+        }
+    }
+    if reports.is_some() || world_save.is_some() || world_load.is_some() {
+        return Err("world options require --minecraft-jar".into());
     }
     if headless || benchmark {
         let planet = Planet::new(DVec3::ZERO, 96., 9.81);

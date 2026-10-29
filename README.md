@@ -132,3 +132,29 @@ The helper verifies the server JAR before execution and verifies the generated
 block/registry report hashes afterward. `--pinned-reports` imports all 35,723 global
 states from those exact reports. The existing `--reports` flag remains a schema-only
 inspection mode. No game JARs or generated report payloads are distributed here.
+
+## Editable textured octree world
+
+```sh
+cargo run --locked --release --features bundled-sdl -- --minecraft-jar /path/to/26.3.jar --reports /path/to/generated/reports --world-save my-world.json
+cargo run --locked --release --features bundled-sdl -- --minecraft-jar /path/to/26.3.jar --reports /path/to/generated/reports --load-world my-world.json --world-save my-world.json
+```
+
+Click to capture the mouse; WASD flies, Space/Ctrl moves vertically, Shift moves
+faster. Keys 1–9 select original blocks, left click removes, right click places,
+and middle click selects a matching palette state. F5 saves when `--world-save`
+is supplied; it also saves on exit. Escape releases the mouse, then exits.
+
+This mode is a small creative editing test world backed by the actual cubic octree
+and global state registry. Chunk-local meshes share original sprites; edits rebuild
+only affected chunks and boundary neighbors. Animated sprite metadata is decoded,
+including frame ordering, durations and interpolation. Conservative full-face
+occlusion avoids treating partial models or transparent textures as solid cubes.
+The renderer uses diagnostic directional shading, not vanilla lighting/AO. It does
+not yet implement survival, placement rules, automatic neighbor state changes,
+non-cubic selection shapes, item entities, biome tint, or vanilla world generation.
+The original spherical-planet mode remains available by omitting the asset arguments.
+
+For repeatable asset-world checks, add `--frames 3 --screenshot world.png`, or
+`--headless --world-save check.json` to validate CPU meshing and save round-tripping
+(the asset-world path currently uses the default desktop build even when headless).

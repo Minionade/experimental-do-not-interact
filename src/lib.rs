@@ -13,3 +13,11 @@ pub mod blockstate;
 pub mod state_registry;
 
 pub mod block_world;
+
+pub mod sprite;
+pub mod world_mesh;
+
+#[cfg(feature = "desktop")]
+pub mod block_desktop;
+#[cfg(feature = "desktop")]
+pub mod textured_renderer;
