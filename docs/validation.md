@@ -171,3 +171,14 @@ prototype defaults are normalized away before transfer. The core suite contains
 73 passing tests; two original-recipe integration tests are opt-in. Specialized
 unsupported recipes now number 361. Smithing trims and menu/progression behavior
 are still unimplemented.
+
+## Transmutation crafting
+
+All 33 original transmutation recipes passed checks for retained names/container
+contents, map IDs, material slot counts, same-color rejection, and inventory
+rollback. The Java runtime probe independently verified bundle contents survive,
+same-color crafting is rejected, and two occupied blank-map slots yield three
+copies regardless of their stack sizes. The shared component-transfer operation
+also remains covered by smithing regressions. Core tests total 75; remaining
+specialized unsupported recipe count is 328. Map rendering and container menus
+are not implemented by this change.

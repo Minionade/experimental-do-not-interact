@@ -68,29 +68,12 @@ impl TransformRecipe {
         if !self.matches(input) {
             return Ok(None);
         }
-        let mut result = self.result.clone();
-        // Copy the source's explicit changes, not its item's prototype defaults.
-        // Recipe-authored component changes take precedence over source changes.
-        let base = input.base.as_ref().unwrap();
-        let base_defaults = &catalog
-            .get(&base.item)
-            .ok_or("unknown base item")?
-            .components;
-        let mut patch: std::collections::BTreeMap<_, _> = base
-            .patch
-            .iter()
-            .filter(|(key, value)| value.as_ref() != base_defaults.get(*key))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        patch.extend(result.patch);
-        let output_defaults = &catalog
-            .get(&result.item)
-            .ok_or("unknown result item")?
-            .components;
-        patch.retain(|key, value| value.as_ref() != output_defaults.get(key));
-        result.patch = patch;
-        result.validate(catalog)?;
-        Ok(Some(result))
+        input
+            .base
+            .as_ref()
+            .unwrap()
+            .transmute(self.result.clone(), catalog)
+            .map(Some)
     }
     pub fn craft_into(
         &self,

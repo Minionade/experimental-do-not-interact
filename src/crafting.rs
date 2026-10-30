@@ -178,6 +178,7 @@ pub struct RecipeBook {
     pub cooking: BTreeMap<String, CookingRecipe>,
     pub stonecutting: BTreeMap<String, StonecuttingRecipe>,
     pub smithing: BTreeMap<String, crate::smithing::TransformRecipe>,
+    pub transmute: BTreeMap<String, crate::transmute::TransmuteRecipe>,
     pub unsupported: BTreeMap<String, String>,
     pub raw: BTreeMap<String, Value>,
 }
@@ -220,6 +221,7 @@ impl RecipeBook {
             cooking: BTreeMap::new(),
             stonecutting: BTreeMap::new(),
             smithing: BTreeMap::new(),
+            transmute: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         };
@@ -234,6 +236,13 @@ impl RecipeBook {
                     book.crafting.insert(
                         id.clone(),
                         CraftingRecipe::parse(&value, tags, catalog)
+                            .map_err(|e| format!("{id}: {e}"))?,
+                    );
+                }
+                "minecraft:crafting_transmute" => {
+                    book.transmute.insert(
+                        id.clone(),
+                        crate::transmute::TransmuteRecipe::parse(&value, tags, catalog)
                             .map_err(|e| format!("{id}: {e}"))?,
                     );
                 }
@@ -355,12 +364,21 @@ impl RecipeBook {
         catalog: &ItemCatalog,
     ) -> Result<Option<&str>, String> {
         grid.validate(catalog)?;
-        Ok(self
+        if let Some((id, _)) = self
             .crafting
             .iter()
             .find(|(_, r)| r.match_slots(grid).is_some())
-            .map(|(id, _)| id.as_str()))
+        {
+            return Ok(Some(id));
+        }
+        for (id, recipe) in &self.transmute {
+            if recipe.preview(grid, catalog)?.is_some() {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
     }
+
     /// Full output and all remainders must fit, otherwise nothing is consumed.
     pub fn craft_into(
         &self,
@@ -372,16 +390,22 @@ impl RecipeBook {
         grid.validate(catalog)?;
         inventory.validate(catalog)?;
         let id = ResourceId::parse(id)?.key();
-        let recipe = self
-            .crafting
-            .get(&id)
-            .ok_or_else(|| format!("unsupported/unknown recipe {id}"))?;
-        let Some(slots) = recipe.match_slots(grid) else {
-            return Ok(false);
+        let (slots, result) = if let Some(recipe) = self.crafting.get(&id) {
+            let Some(slots) = recipe.match_slots(grid) else {
+                return Ok(false);
+            };
+            (slots, recipe.result.clone())
+        } else if let Some(recipe) = self.transmute.get(&id) {
+            let Some(matched) = recipe.preview(grid, catalog)? else {
+                return Ok(false);
+            };
+            matched
+        } else {
+            return Err(format!("unsupported/unknown recipe {id}"));
         };
         let mut g = grid.clone();
         let mut inv = inventory.clone();
-        if inv.insert(recipe.result.clone(), catalog)?.is_some() {
+        if inv.insert(result, catalog)?.is_some() {
             return Ok(false);
         }
         for index in slots {
@@ -643,6 +667,7 @@ mod tests {
             cooking: BTreeMap::new(),
             stonecutting: BTreeMap::new(),
             smithing: BTreeMap::new(),
+            transmute: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         };
@@ -673,6 +698,7 @@ mod tests {
             cooking: BTreeMap::new(),
             stonecutting: [("minecraft:test".into(), recipe)].into(),
             smithing: BTreeMap::new(),
+            transmute: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         }

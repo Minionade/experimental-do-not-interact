@@ -147,7 +147,7 @@ fn run() -> Result<(), String> {
             .ok_or("recipe operations require --pinned-reports")?;
         let tags = orbital_voxel::crafting::ItemTags::load(&mut assets, items)?;
         let book = orbital_voxel::crafting::RecipeBook::load(&mut assets, &tags, items)?;
-        println!("Loaded {} item tags, {} ordinary crafting recipes, {} stonecutting recipes, {} smithing transforms, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.stonecutting.len(),book.smithing.len(),book.cooking.len(),book.unsupported.len());
+        println!("Loaded {} item tags, {} ordinary crafting recipes, {} transmute recipes, {} stonecutting recipes, {} smithing transforms, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.transmute.len(),book.stonecutting.len(),book.smithing.len(),book.cooking.len(),book.unsupported.len());
         if let Some(path) = smithing_input {
             let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
             if file.metadata().map_err(|e| e.to_string())?.len() > 1024 * 1024 {
@@ -214,7 +214,7 @@ fn run() -> Result<(), String> {
                 serde_json::from_reader(file).map_err(|e| e.to_string())?;
             let recipe = recipe_id
                 .or(book.find_crafting(&grid, items)?.map(str::to_string))
-                .ok_or("no ordinary recipe matches grid")?;
+                .ok_or("no supported crafting recipe matches grid")?;
             let mut inventory = orbital_voxel::items::Inventory::new(36)?;
             if !book.craft_into(&recipe, &mut grid, &mut inventory, items)? {
                 return Err("recipe did not craft".into());

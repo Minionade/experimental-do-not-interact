@@ -229,3 +229,20 @@ pinned server: compile it with the extracted server/library JARs on the classpat
 then run it with the generated reports directory as its sole argument. It checks
 original Java smithing/component-transfer behavior; it is not needed by the Rust
 runtime. Use Java 25 and the hash-verified server used by `generate_reports.py`.
+
+## Content-preserving crafting
+
+All 33 original transmutation recipes execute through the crafting backend:
+16 bundle colors, 16 shulker-box colors, and map cloning. Names and stored item
+contents survive recoloring; dyeing an already matching color is rejected.
+Map cloning counts occupied blank-map slots, consuming one from each and
+preserving the source map ID. It does not render or generate map images yet.
+
+```sh
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --craft-grid examples/crafting/pink_bundle.json --recipe pink_bundle
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --craft-grid examples/crafting/map_cloning.json --recipe map_cloning
+```
+
+Original-data tests cover all 33 recipes, stored contents, same-color rejection,
+stacked materials, and rollback when the output cannot fit. Container interaction
+screens and map drawing remain separate, unimplemented systems.

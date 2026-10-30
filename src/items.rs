@@ -141,6 +141,34 @@ impl ItemStack {
         }
         Ok(())
     }
+    /// Adopt a new item prototype, retaining explicit changes and applying recipe overrides last.
+    pub fn transmute(
+        &self,
+        mut template: ItemStack,
+        catalog: &ItemCatalog,
+    ) -> Result<ItemStack, String> {
+        self.validate(catalog)?;
+        template.validate(catalog)?;
+        let source = &catalog
+            .get(&self.item)
+            .ok_or("unknown source item")?
+            .components;
+        let mut patch: BTreeMap<_, _> = self
+            .patch
+            .iter()
+            .filter(|(key, value)| value.as_ref() != source.get(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        patch.extend(template.patch);
+        let target = &catalog
+            .get(&template.item)
+            .ok_or("unknown target item")?
+            .components;
+        patch.retain(|key, value| value.as_ref() != target.get(key));
+        template.patch = patch;
+        template.validate(catalog)?;
+        Ok(template)
+    }
     pub fn same_kind(&self, other: &Self, catalog: &ItemCatalog) -> bool {
         self.item == other.item
             && self
