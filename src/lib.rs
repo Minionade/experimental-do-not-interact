@@ -27,3 +27,7 @@ pub mod items;
 pub mod crafting;
 
 pub mod collision;
+
+pub mod oracle;
+
+pub mod block_collision;

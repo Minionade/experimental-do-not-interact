@@ -2,7 +2,7 @@
 
 Rust foundation targeting **1:1 Minecraft Java 26.3 content and gameplay**, with **3D octree chunks, spherical planets, spaceflight, and native rigid-body physics**. The working crate name is `orbital-voxel`.
 
-**This is a runnable engine prototype, not a port of Minecraft 26.3.** Minecraft gameplay, world loading, networking, and Java mod compatibility are not implemented. A verified vanilla-resource importer is implemented; the desktop scene still uses diagnostic geometry and colors. The renderer uses engine-owned shaders; Iris shaderpack compatibility is outside the project requirements.
+**This is a runnable engine prototype, not a port of Minecraft 26.3.** Full Minecraft gameplay, vanilla world loading, networking, and Java mod compatibility are not implemented. The original-asset block world supports editing, original crafting recipes, and static-shape walking; the separate planetary scene uses diagnostic geometry and colors. The renderer uses engine-owned shaders; Iris shaderpack compatibility is outside the project requirements.
 
 ## Run
 
@@ -121,7 +121,7 @@ The code and procedural visual assets in this repository are original project wo
 
 ## Generate exact registry reports
 
-Use your official 26.3 server JAR and Java 25 (Python 3 is needed only for this helper):
+Use your official 26.3 server JAR and a Java 25 JDK (including `javac`) (Python 3 is needed only for this helper):
 
 ```sh
 python tools/generate_reports.py --server-jar /path/to/server.jar --java /path/to/java --output /path/to/generated
@@ -129,7 +129,7 @@ cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar 
 ```
 
 The helper verifies the server JAR before execution and verifies the generated
-block/registry report hashes afterward. `--pinned-reports` imports all 35,723 global
+block/registry, item-component, and runtime physics report hashes afterward. The helper compiles the small `VanillaOracle.java` exporter against the extracted server libraries; `--javac` can select a compiler explicitly. `--pinned-reports` imports all 35,723 global
 states from those exact reports. The existing `--reports` flag remains a schema-only
 inspection mode. No game JARs or generated report payloads are distributed here.
 
@@ -141,7 +141,7 @@ cargo run --locked --release --features bundled-sdl -- --minecraft-jar /path/to/
 ```
 
 Click to capture the mouse; WASD flies, Space/Ctrl moves vertically, Shift moves
-faster. Keys 1–9 select original blocks, left click removes, right click places,
+faster. F toggles walking with gravity, slab steps, and Space to jump. Walking uses a fixed 120 Hz step; its movement tuning is experimental. Keys 1–9 select original blocks, left click removes, right click places,
 and middle click selects a matching palette state. F5 saves when `--world-save`
 is supplied; it also saves on exit. Escape releases the mouse, then exits.
 
@@ -152,7 +152,7 @@ including frame ordering, durations and interpolation. Conservative full-face
 occlusion avoids treating partial models or transparent textures as solid cubes.
 The renderer uses diagnostic directional shading, not vanilla lighting/AO. It does
 not yet implement survival, placement rules, automatic neighbor state changes,
-non-cubic selection shapes, item entities, biome tint, or vanilla world generation.
+item entities, biome tint, or vanilla world generation. Selection and walking use original static outline/collision boxes. Context-dependent shapes (including powder snow and position-offset plants) are rejected explicitly. These shapes, moving blocks, fall damage, fluids, and vanilla movement tuning remain unfinished.
 The original spherical-planet mode remains available by omitting the asset arguments.
 
 For repeatable asset-world checks, add `--frames 3 --screenshot world.png`, or
@@ -173,3 +173,21 @@ The audit prints the resulting grid and inventory. These are backend operations;
 the desktop crafting interface and survival loop are not wired up yet. Cooking
 recipes are parsed with original time/experience values but are not simulated yet.
 Special recipe types are retained and counted explicitly rather than approximated.
+
+
+## Original physics validation
+
+Regenerate older report directories with the updated helper to add `physics.json`.
+The pinned export includes 35,723 states' shapes, hardness, resistance, friction,
+light emission and tool requirements, plus every item's crafting remainder.
+35,425 states currently support context-free shape queries. Dynamic and
+position-offset states require additional runtime behavior.
+
+```sh
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --audit-physics
+MINECRAFT_REPORTS=/path/to/generated/reports cargo test --locked --no-default-features --test original_physics -- --ignored
+```
+
+The explicit integration test checks original slab selection, slab landing and
+stepping, fence height, and rejection of contextual shapes. Original report data
+is supplied locally and is not included in the repository.

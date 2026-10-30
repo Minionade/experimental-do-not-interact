@@ -22,5 +22,6 @@
     "blocks.json": "91d30c3a9dd67ccaf498cb6d9d9abdb0fe0a8d38",
     "registries.json": "8b707c5e9239d22f129f35973a83958234689b59"
   },
-  "item_components_sha1": "85f23ad91c88e4b9064c96d17f0e289aa487adc9"
+  "item_components_sha1": "85f23ad91c88e4b9064c96d17f0e289aa487adc9",
+  "physics_sha1": "251fa36044bc2b2c6b89a92b2657975e8416e828"
 }

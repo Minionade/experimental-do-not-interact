@@ -14,6 +14,7 @@ fn run() -> Result<(), String> {
     let mut pinned_reports = false;
     let mut audit = false;
     let mut audit_recipes = false;
+    let mut audit_physics = false;
     let mut craft_grid = None;
     let mut recipe_id = None;
     let mut inspections = Vec::new();
@@ -32,6 +33,7 @@ fn run() -> Result<(), String> {
             }
             "--audit-models" => audit = true,
             "--audit-recipes" => audit_recipes = true,
+            "--audit-physics" => audit_physics = true,
             "--craft-grid" => {
                 craft_grid = Some(PathBuf::from(
                     args.next().ok_or("--craft-grid needs JSON path")?,
@@ -44,11 +46,14 @@ fn run() -> Result<(), String> {
                 ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
             )),
             "--help" | "-h" => {
-                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
+                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--audit-physics] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}; use --help")),
         }
+    }
+    if audit_physics && !pinned_reports {
+        return Err("--audit-physics requires --pinned-reports".into());
     }
     let mut assets = ClientAssets::open(&jar.ok_or("--minecraft-jar is required")?)?;
     println!(
@@ -71,6 +76,23 @@ fn run() -> Result<(), String> {
         .transpose()?;
     if let Some(reports) = &reports {
         let registry = orbital_voxel::state_registry::StateRegistry::from_reports(reports)?;
+        if audit_physics {
+            let physics = orbital_voxel::oracle::PhysicsCatalog::load_pinned(
+                &report_directory.as_ref().unwrap().join("physics.json"),
+                &registry,
+            )?;
+            let mut supported = 0;
+            for (id, _) in registry.states() {
+                if physics.static_boxes(id, false).is_ok() {
+                    supported += 1;
+                }
+            }
+            println!(
+                "Verified physics for {} states; {supported} static shapes supported",
+                registry.len()
+            );
+        }
+
         println!(
             "Loaded {} global states; fingerprint {}. {}",
             registry.len(),

@@ -343,18 +343,11 @@ fn parse_result(value: &Value, catalog: &ItemCatalog) -> Result<ItemStack, Strin
     stack.validate(catalog)?;
     Ok(stack)
 }
-fn crafting_remainder(item: &str) -> Option<&'static str> {
+pub(crate) fn crafting_remainder(item: &str) -> Option<&'static str> {
     match item {
-        "minecraft:milk_bucket"
-        | "minecraft:water_bucket"
-        | "minecraft:lava_bucket"
-        | "minecraft:powder_snow_bucket"
-        | "minecraft:cod_bucket"
-        | "minecraft:salmon_bucket"
-        | "minecraft:pufferfish_bucket"
-        | "minecraft:tropical_fish_bucket"
-        | "minecraft:axolotl_bucket"
-        | "minecraft:tadpole_bucket" => Some("minecraft:bucket"),
+        "minecraft:milk_bucket" | "minecraft:water_bucket" | "minecraft:lava_bucket" => {
+            Some("minecraft:bucket")
+        }
         "minecraft:honey_bottle" | "minecraft:dragon_breath" => Some("minecraft:glass_bottle"),
         _ => None,
     }

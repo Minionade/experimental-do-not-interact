@@ -136,3 +136,18 @@ slab landing and stepping, low ceilings, negative coordinates, and rejected
 penetrations/invalid inputs. This is infrastructure: the desktop camera remains
 in flight mode until authoritative state shapes are connected. It does not claim
 vanilla movement tuning, moving-collider response, or dynamic shape parity.
+
+
+## Original shape integration
+
+The reproducible Java 25 exporter was compiled and run against the pinned 26.3
+server. Regenerating the complete reports reproduced the physics SHA-1 in the
+version pin. The Rust importer validated all 35,723 state identities and all
+1,658 item remainder records; 35,425 states have supported static shapes.
+The original-data integration test passed for slab targeting, landing, stepping,
+fence height, and explicit dynamic/position-offset rejection. The ordinary core
+suite has 68 passing tests; the original-data test is separately opt-in.
+Desktop walking uses these boxes at 120 Hz with stepping and sliding. It is
+experimental movement, without vanilla acceleration/drag, fluid behavior, fall
+damage, or dynamic collision semantics. Planetary character movement remains a
+separate implementation.

@@ -1,7 +1,10 @@
 //! Interactive original-asset octree test world, using registered Minecraft states.
 use crate::{
+    block_collision,
     block_world::BlockWorld,
     blockstate::parse_properties,
+    collision::{self, Aabb},
+    oracle::PhysicsCatalog,
     state_registry::StateRegistry,
     textured_renderer::TexturedRenderer,
     vanilla::{ClientAssets, RegistryReports, ResourceId},
@@ -94,6 +97,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut assets = ClientAssets::open(&options.jar)?;
     let reports = RegistryReports::load_pinned(&options.reports)?;
     let registry = Arc::new(StateRegistry::from_reports(&reports)?);
+    let physics = PhysicsCatalog::load_pinned(&options.reports.join("physics.json"), &registry)?;
     let mut world = if let Some(path) = &options.load {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         if file.metadata().map_err(|e| e.to_string())?.len() > 128 * 1024 * 1024 {
@@ -166,6 +170,16 @@ pub fn run(options: Options) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut selected = 0usize;
+    let mut walking = false;
+    let mut vertical_velocity = 0.0;
+    let mut grounded = false;
+    let mut accumulator = 0.0;
+    let body_at = |eye: DVec3| {
+        Aabb::new(
+            eye + DVec3::new(-0.3, -1.62, -0.3),
+            eye + DVec3::new(0.3, 0.18, 0.3),
+        )
+    };
     let mut camera = DVec3::new(10., 8., 16.);
     let (mut yaw, mut pitch) = (0.48f64, -0.35f64);
     let mut events = sdl.event_pump()?;
@@ -174,7 +188,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut previous = start;
     let mut title_time = start;
     let mut frames = 0u64;
-    println!("Click to capture; WASD fly, Space/Ctrl vertical, Shift fast; 1-9 select; left break, right place, middle pick; F5 save; Esc release/quit. Creative test controls, not survival parity.");
+    println!("Click to capture; F toggles walk/fly, Space jumps in walk mode; WASD fly, Space/Ctrl vertical, Shift fast; 1-9 select; left break, right place, middle pick; F5 save; Esc release/quit. Creative test controls, not survival parity.");
     'running: loop {
         let now = Instant::now();
         let dt = (now - previous).as_secs_f64().min(0.1);
@@ -200,6 +214,27 @@ pub fn run(options: Options) -> Result<(), String> {
                     } else {
                         break 'running;
                     }
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::F),
+                    repeat: false,
+                    ..
+                } => {
+                    if walking {
+                        walking = false;
+                    } else {
+                        let body = body_at(camera)?;
+                        match block_collision::colliders(&world, &physics, body) {
+                            Ok(boxes) if boxes.is_empty() => {
+                                walking = true;
+                            }
+                            Ok(_) => eprintln!("Cannot enter walk mode inside a block"),
+                            Err(e) => eprintln!("Cannot enter walk mode: {e}"),
+                        }
+                    }
+                    vertical_velocity = 0.0;
+                    grounded = false;
+                    accumulator = 0.0;
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::F5),
@@ -243,7 +278,9 @@ pub fn run(options: Options) -> Result<(), String> {
                         sdl.mouse().set_relative_mouse_mode(true);
                         continue;
                     }
-                    if let Some(hit) = world.raycast(camera, forward(yaw, pitch), 6.) {
+                    if let Some(hit) =
+                        block_collision::raycast(&world, &physics, camera, forward(yaw, pitch), 6.)?
+                    {
                         match mouse_btn {
                             MouseButton::Left => world.set(hit.cell, 0)?,
                             MouseButton::Right => {
@@ -253,7 +290,14 @@ pub fn run(options: Options) -> Result<(), String> {
                                     && world.get(p).is_some_and(|id| registry.is_air(id))
                                 {
                                     cache.ensure(palette[selected], &registry, &mut assets)?;
-                                    world.set(p, palette[selected])?;
+                                    let body = body_at(camera)?;
+                                    let intersects_player =
+                                        physics.static_boxes(palette[selected], false)?.iter().any(
+                                            |shape| shape.translated(p.as_dvec3()).intersects(body),
+                                        );
+                                    if !intersects_player {
+                                        world.set(p, palette[selected])?;
+                                    }
                                 }
                             }
                             MouseButton::Middle => {
@@ -276,7 +320,44 @@ pub fn run(options: Options) -> Result<(), String> {
         let movement = look * axis(Scancode::W, Scancode::S)
             + look.cross(DVec3::Y).normalize() * axis(Scancode::D, Scancode::A)
             + DVec3::Y * axis(Scancode::Space, Scancode::LCtrl);
-        if captured {
+        if captured && walking {
+            accumulator += dt;
+            const TICK: f64 = 1.0 / 120.0;
+            while accumulator >= TICK {
+                accumulator -= TICK;
+                if grounded && keys.is_scancode_pressed(Scancode::Space) {
+                    vertical_velocity = 8.4;
+                }
+                vertical_velocity = (vertical_velocity - 32.0 * TICK).max(-78.4);
+                let flat = forward(yaw, 0.0);
+                let horizontal = (flat * axis(Scancode::W, Scancode::S)
+                    + flat.cross(DVec3::Y) * axis(Scancode::D, Scancode::A))
+                .normalize_or_zero()
+                    * 4.317;
+                let desired = (horizontal + DVec3::Y * vertical_velocity) * TICK;
+                let body = body_at(camera)?;
+                let result =
+                    block_collision::colliders(&world, &physics, body.swept_bounds(desired, 0.6))
+                        .and_then(|boxes| {
+                            collision::move_body(body, &boxes, desired, 0.6, grounded)
+                        });
+                match result {
+                    Ok(motion) => {
+                        camera += motion.delta;
+                        grounded = motion.grounded;
+                        if motion.blocked[1] {
+                            vertical_velocity = 0.0;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Walking paused: {e}");
+                        walking = false;
+                        accumulator = 0.0;
+                        break;
+                    }
+                }
+            }
+        } else if captured {
             camera += movement.normalize_or_zero()
                 * dt
                 * if keys.is_scancode_pressed(Scancode::LShift) {
@@ -304,14 +385,13 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         window.gl_swap_window();
         if title_time.elapsed().as_secs_f32() > 0.25 {
-            let hit = world
-                .raycast(camera, look, 6.)
+            let hit = block_collision::raycast(&world, &physics, camera, look, 6.)?
                 .and_then(|h| registry.get(h.state))
                 .map(|s| s.block.as_str())
                 .unwrap_or("air");
             let _ = window.set_title(&format!(
-                "{} | target {hit} | {draws} draws {triangles} triangles | 1-9 select / F5 save",
-                names[selected]
+                "{} | target {hit} | {draws} draws {triangles} triangles | {} | F walk/fly / F5 save",
+                names[selected], if walking { "walk" } else { "fly" }
             ));
             title_time = now;
         }
