@@ -191,3 +191,20 @@ MINECRAFT_REPORTS=/path/to/generated/reports cargo test --locked --no-default-fe
 The explicit integration test checks original slab selection, slab landing and
 stepping, fence height, and rejection of contextual shapes. Original report data
 is supplied locally and is not included in the repository.
+
+## Stonecutting backend
+
+All 351 original stonecutting recipes are executable through `RecipeBook`.
+`find_stonecutting` lists valid recipe IDs; `stonecut_into` consumes one input only
+when the entire selected output fits in the destination inventory. Menu ordering,
+stonecutter UI, recipe unlocks, sounds and advancements are not implemented.
+
+```sh
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --stonecut-input stone --recipe stone_slab_from_stone_stonecutting
+MINECRAFT_CLIENT_JAR=/path/to/26.3.jar MINECRAFT_REPORTS=/path/to/generated/reports cargo test --locked --no-default-features --test original_recipes -- --ignored
+```
+
+Omit `--recipe` to list available outputs. The original-data test executes every
+stonecutting recipe and verifies source-defined output counts and blocked-output
+rollback. The ordinary suite also checks partial-stack capacity and component
+isolation between input and output.

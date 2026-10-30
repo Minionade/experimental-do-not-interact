@@ -151,3 +151,11 @@ Desktop walking uses these boxes at 120 Hz with stepping and sliding. It is
 experimental movement, without vanilla acceleration/drag, fluid behavior, fall
 damage, or dynamic collision semantics. Planetary character movement remains a
 separate implementation.
+
+## Stonecutting
+
+All 351 pinned stonecutting recipes passed input consumption/output validation
+and full-inventory rollback checks against original recipe JSON. Seventy core
+tests pass; warning-free Clippy covers all targets. This is backend execution,
+not stonecutter menu or progression parity. Specialized unsupported recipes are
+now 373, down from 724; cooking recipes remain parsed but not simulated.

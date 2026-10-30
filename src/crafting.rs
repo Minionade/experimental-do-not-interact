@@ -142,6 +142,21 @@ pub struct CraftingRecipe {
     pattern: Pattern,
     pub result: ItemStack,
 }
+pub struct StonecuttingRecipe {
+    ingredient: Ingredient,
+    pub result: ItemStack,
+}
+impl StonecuttingRecipe {
+    fn parse(value: &Value, tags: &ItemTags, catalog: &ItemCatalog) -> Result<Self, String> {
+        Ok(Self {
+            ingredient: Ingredient::parse(&value["ingredient"], tags, catalog)?,
+            result: parse_result(&value["result"], catalog)?,
+        })
+    }
+    pub fn accepts(&self, stack: &ItemStack) -> bool {
+        self.ingredient.accepts(stack)
+    }
+}
 pub struct CookingRecipe {
     ingredient: Ingredient,
     pub result: ItemStack,
@@ -157,6 +172,7 @@ impl CookingRecipe {
 pub struct RecipeBook {
     pub crafting: BTreeMap<String, CraftingRecipe>,
     pub cooking: BTreeMap<String, CookingRecipe>,
+    pub stonecutting: BTreeMap<String, StonecuttingRecipe>,
     pub unsupported: BTreeMap<String, String>,
     pub raw: BTreeMap<String, Value>,
 }
@@ -197,6 +213,7 @@ impl RecipeBook {
         let mut book = Self {
             crafting: BTreeMap::new(),
             cooking: BTreeMap::new(),
+            stonecutting: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         };
@@ -211,6 +228,13 @@ impl RecipeBook {
                     book.crafting.insert(
                         id.clone(),
                         CraftingRecipe::parse(&value, tags, catalog)
+                            .map_err(|e| format!("{id}: {e}"))?,
+                    );
+                }
+                "minecraft:stonecutting" => {
+                    book.stonecutting.insert(
+                        id.clone(),
+                        StonecuttingRecipe::parse(&value, tags, catalog)
                             .map_err(|e| format!("{id}: {e}"))?,
                     );
                 }
@@ -259,6 +283,58 @@ impl RecipeBook {
             book.raw.insert(id, value);
         }
         Ok(book)
+    }
+    /// Returns stable recipe IDs. Menu ordering is a separate presentation concern.
+    pub fn find_stonecutting(
+        &self,
+        input: &ItemStack,
+        catalog: &ItemCatalog,
+    ) -> Result<Vec<&str>, String> {
+        input.validate(catalog)?;
+        Ok(self
+            .stonecutting
+            .iter()
+            .filter(|(_, recipe)| recipe.accepts(input))
+            .map(|(id, _)| id.as_str())
+            .collect())
+    }
+    /// Consume one input only if the entire selected output fits.
+    pub fn stonecut_into(
+        &self,
+        id: &str,
+        input: &mut Option<ItemStack>,
+        inventory: &mut Inventory,
+        catalog: &ItemCatalog,
+    ) -> Result<bool, String> {
+        inventory.validate(catalog)?;
+        let id = ResourceId::parse(id)?.key();
+        let recipe = self
+            .stonecutting
+            .get(&id)
+            .ok_or_else(|| format!("unknown stonecutting recipe {id}"))?;
+        let Some(stack) = input.as_ref() else {
+            return Ok(false);
+        };
+        stack.validate(catalog)?;
+        if !recipe.accepts(stack) {
+            return Ok(false);
+        }
+        let mut next_inventory = inventory.clone();
+        if next_inventory
+            .insert(recipe.result.clone(), catalog)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let mut next_input = stack.clone();
+        next_input.count -= 1;
+        *input = if next_input.count == 0 {
+            None
+        } else {
+            Some(next_input)
+        };
+        *inventory = next_inventory;
+        Ok(true)
     }
     pub fn find_crafting(
         &self,
@@ -552,6 +628,7 @@ mod tests {
         let book = RecipeBook {
             crafting: [("minecraft:test".into(), r)].into(),
             cooking: BTreeMap::new(),
+            stonecutting: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         };
@@ -568,6 +645,77 @@ mod tests {
         inv.remove(0, 64).unwrap();
         assert!(book.craft_into("test", &mut g, &mut inv, &c).unwrap());
         assert_eq!(g.slots[0].as_ref().unwrap().item, "minecraft:bucket");
+    }
+    fn stonecutting_book(catalog: &ItemCatalog) -> RecipeBook {
+        let recipe = StonecuttingRecipe::parse(
+            &json!({"ingredient":"minecraft:stone",
+            "result":{"id":"minecraft:stick","count":2}}),
+            &ItemTags::default(),
+            catalog,
+        )
+        .unwrap();
+        RecipeBook {
+            crafting: BTreeMap::new(),
+            cooking: BTreeMap::new(),
+            stonecutting: [("minecraft:test".into(), recipe)].into(),
+            unsupported: BTreeMap::new(),
+            raw: BTreeMap::new(),
+        }
+    }
+    #[test]
+    fn stonecutting_requires_entire_output_to_fit() {
+        let c = crate::items::fixture();
+        let book = stonecutting_book(&c);
+        let mut input = Some(c.stack("stone", 2).unwrap());
+        let mut inventory = Inventory::new(1).unwrap();
+        inventory
+            .set(0, Some(c.stack("stick", 63).unwrap()), &c)
+            .unwrap();
+        let before_input = input.clone();
+        let before_inventory = inventory.clone();
+        assert!(!book
+            .stonecut_into("test", &mut input, &mut inventory, &c)
+            .unwrap());
+        assert_eq!(input, before_input);
+        assert_eq!(inventory, before_inventory);
+        inventory.remove(0, 1).unwrap();
+        assert!(book
+            .stonecut_into("test", &mut input, &mut inventory, &c)
+            .unwrap());
+        assert_eq!(input.as_ref().unwrap().count, 1);
+        assert_eq!(inventory.slots()[0].as_ref().unwrap().count, 64);
+    }
+    #[test]
+    fn stonecutting_consumes_final_input_without_copying_components() {
+        let c = crate::items::fixture();
+        let book = stonecutting_book(&c);
+        let mut stone = c.stack("stone", 1).unwrap();
+        stone
+            .patch
+            .insert("minecraft:custom_name".into(), Some(json!("Named input")));
+        let mut input = Some(stone);
+        let mut inventory = Inventory::new(2).unwrap();
+        assert_eq!(
+            book.find_stonecutting(input.as_ref().unwrap(), &c).unwrap(),
+            vec!["minecraft:test"]
+        );
+        assert!(book
+            .stonecut_into("test", &mut input, &mut inventory, &c)
+            .unwrap());
+        assert!(input.is_none());
+        assert!(inventory.slots()[0].as_ref().unwrap().patch.is_empty());
+        assert!(!book
+            .stonecut_into("test", &mut input, &mut inventory, &c)
+            .unwrap());
+        let mut wrong = Some(c.stack("iron_ingot", 1).unwrap());
+        assert!(book
+            .find_stonecutting(wrong.as_ref().unwrap(), &c)
+            .unwrap()
+            .is_empty());
+        assert!(!book
+            .stonecut_into("test", &mut wrong, &mut inventory, &c)
+            .unwrap());
+        assert_eq!(wrong.as_ref().unwrap().count, 1);
     }
     #[test]
     fn tag_cycles_fail() {

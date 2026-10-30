@@ -17,6 +17,7 @@ fn run() -> Result<(), String> {
     let mut audit_physics = false;
     let mut craft_grid = None;
     let mut recipe_id = None;
+    let mut stonecut_input = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -34,6 +35,9 @@ fn run() -> Result<(), String> {
             "--audit-models" => audit = true,
             "--audit-recipes" => audit_recipes = true,
             "--audit-physics" => audit_physics = true,
+            "--stonecut-input" => {
+                stonecut_input = Some(args.next().ok_or("--stonecut-input needs item ID")?)
+            }
             "--craft-grid" => {
                 craft_grid = Some(PathBuf::from(
                     args.next().ok_or("--craft-grid needs JSON path")?,
@@ -46,7 +50,7 @@ fn run() -> Result<(), String> {
                 ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
             )),
             "--help" | "-h" => {
-                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--audit-physics] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
+                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--audit-physics] [--stonecut-input ITEM_ID --recipe RECIPE_ID] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}; use --help")),
@@ -118,13 +122,38 @@ fn run() -> Result<(), String> {
             items.len()
         );
     }
-    if audit_recipes || craft_grid.is_some() {
+    if stonecut_input.is_some() && craft_grid.is_some() {
+        return Err("choose either --stonecut-input or --craft-grid".into());
+    }
+    if audit_recipes || craft_grid.is_some() || stonecut_input.is_some() {
         let items = items
             .as_ref()
             .ok_or("recipe operations require --pinned-reports")?;
         let tags = orbital_voxel::crafting::ItemTags::load(&mut assets, items)?;
         let book = orbital_voxel::crafting::RecipeBook::load(&mut assets, &tags, items)?;
-        println!("Loaded {} item tags, {} ordinary crafting recipes, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.cooking.len(),book.unsupported.len());
+        println!("Loaded {} item tags, {} ordinary crafting recipes, {} stonecutting recipes, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.stonecutting.len(),book.cooking.len(),book.unsupported.len());
+        if let Some(name) = stonecut_input {
+            let mut input = Some(items.stack(&name, 1)?);
+            let choices = book.find_stonecutting(input.as_ref().unwrap(), items)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"stonecutting_choices":choices}))
+                    .map_err(|e| e.to_string())?
+            );
+            if let Some(recipe) = recipe_id.as_ref() {
+                let mut inventory = orbital_voxel::items::Inventory::new(36)?;
+                if !book.stonecut_into(recipe, &mut input, &mut inventory, items)? {
+                    return Err("selected stonecutting recipe does not accept this input".into());
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"recipe":recipe,"input":input,"inventory":inventory})
+                    )
+                    .map_err(|e| e.to_string())?
+                );
+            }
+        }
         if let Some(path) = craft_grid {
             let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
             if file.metadata().map_err(|e| e.to_string())?.len() > 1024 * 1024 {
