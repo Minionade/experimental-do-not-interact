@@ -25,3 +25,5 @@ pub mod textured_renderer;
 pub mod items;
 
 pub mod crafting;
+
+pub mod collision;

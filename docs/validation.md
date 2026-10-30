@@ -127,3 +127,12 @@ container remainders. End-to-end runs crafted an Iron Pickaxe and Cake from the 
 recipes: the former consumed one item per occupied slot, and the latter returned all
 three buckets. No cooking simulation, special crafting, recipe unlocks, or GUI parity
 is claimed by these backend checks.
+
+## Swept collision kernel
+
+The collision module resolves f64 player-sized boxes against supplied unions of
+axis-aligned boxes. Six regression tests cover high-speed wall impacts, sliding,
+slab landing and stepping, low ceilings, negative coordinates, and rejected
+penetrations/invalid inputs. This is infrastructure: the desktop camera remains
+in flight mode until authoritative state shapes are connected. It does not claim
+vanilla movement tuning, moving-collider response, or dynamic shape parity.
