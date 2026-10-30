@@ -18,6 +18,7 @@ fn run() -> Result<(), String> {
     let mut craft_grid = None;
     let mut recipe_id = None;
     let mut stonecut_input = None;
+    let mut smithing_input = None;
     let mut inspections = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -38,6 +39,11 @@ fn run() -> Result<(), String> {
             "--stonecut-input" => {
                 stonecut_input = Some(args.next().ok_or("--stonecut-input needs item ID")?)
             }
+            "--smithing-input" => {
+                smithing_input = Some(PathBuf::from(
+                    args.next().ok_or("--smithing-input needs JSON path")?,
+                ))
+            }
             "--craft-grid" => {
                 craft_grid = Some(PathBuf::from(
                     args.next().ok_or("--craft-grid needs JSON path")?,
@@ -50,7 +56,7 @@ fn run() -> Result<(), String> {
                 ResourceId::parse(&args.next().ok_or("inspection needs an ID")?)?,
             )),
             "--help" | "-h" => {
-                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--audit-physics] [--stonecut-input ITEM_ID --recipe RECIPE_ID] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
+                println!("vanilla-audit --minecraft-jar FILE.jar [--audit-models] [--inspect-item ID] [--inspect-block ID] [--inspect-entity ID] [--inspect-texture ID] [--bake-model MODEL_ID] [--reports DIR | --pinned-reports DIR] [--audit-recipes] [--audit-physics] [--stonecut-input ITEM_ID --recipe RECIPE_ID] [--smithing-input FILE.json --recipe RECIPE_ID] [--craft-grid FILE.json --recipe ID]\nReads exact, hash-pinned Minecraft 26.3 resources. Does not launch the game or certify gameplay parity.");
                 return Ok(());
             }
             _ => return Err(format!("unknown option {arg}; use --help")),
@@ -122,16 +128,61 @@ fn run() -> Result<(), String> {
             items.len()
         );
     }
-    if stonecut_input.is_some() && craft_grid.is_some() {
-        return Err("choose either --stonecut-input or --craft-grid".into());
+    if [
+        stonecut_input.is_some(),
+        craft_grid.is_some(),
+        smithing_input.is_some(),
+    ]
+    .into_iter()
+    .filter(|v| *v)
+    .count()
+        > 1
+    {
+        return Err("choose one of --stonecut-input, --craft-grid, --smithing-input".into());
     }
-    if audit_recipes || craft_grid.is_some() || stonecut_input.is_some() {
+    if audit_recipes || craft_grid.is_some() || stonecut_input.is_some() || smithing_input.is_some()
+    {
         let items = items
             .as_ref()
             .ok_or("recipe operations require --pinned-reports")?;
         let tags = orbital_voxel::crafting::ItemTags::load(&mut assets, items)?;
         let book = orbital_voxel::crafting::RecipeBook::load(&mut assets, &tags, items)?;
-        println!("Loaded {} item tags, {} ordinary crafting recipes, {} stonecutting recipes, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.stonecutting.len(),book.cooking.len(),book.unsupported.len());
+        println!("Loaded {} item tags, {} ordinary crafting recipes, {} stonecutting recipes, {} smithing transforms, {} cooking recipes; {} specialized recipes retained but not executed",tags.len(),book.crafting.len(),book.stonecutting.len(),book.smithing.len(),book.cooking.len(),book.unsupported.len());
+        if let Some(path) = smithing_input {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            if file.metadata().map_err(|e| e.to_string())?.len() > 1024 * 1024 {
+                return Err("smithing input exceeds size limit".into());
+            }
+            let mut input: orbital_voxel::smithing::SmithingInput =
+                serde_json::from_reader(file).map_err(|e| e.to_string())?;
+            input.validate(items)?;
+            let choices: Vec<_> = book
+                .smithing
+                .iter()
+                .filter(|(_, recipe)| recipe.matches(&input))
+                .map(|(id, _)| id.as_str())
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"smithing_choices":choices}))
+                    .map_err(|e| e.to_string())?
+            );
+            if let Some(id) = recipe_id.as_ref() {
+                let id = ResourceId::parse(id)?.key();
+                let recipe = book.smithing.get(&id).ok_or("unknown smithing transform")?;
+                let mut inventory = orbital_voxel::items::Inventory::new(36)?;
+                if !recipe.craft_into(&mut input, &mut inventory, items)? {
+                    return Err("smithing input does not match selected recipe".into());
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"recipe":id,"input":input,"inventory":inventory})
+                    )
+                    .map_err(|e| e.to_string())?
+                );
+            }
+        }
         if let Some(name) = stonecut_input {
             let mut input = Some(items.stack(&name, 1)?);
             let choices = book.find_stonecutting(input.as_ref().unwrap(), items)?;

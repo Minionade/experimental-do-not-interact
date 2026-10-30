@@ -57,3 +57,82 @@ fn every_original_stonecutting_recipe_executes_atomically() {
         assert_eq!(input.as_ref().unwrap().count, 1, "{id}");
     }
 }
+
+#[test]
+#[ignore = "requires original hash-pinned client JAR and reports"]
+fn all_original_smithing_transforms_preserve_base_changes() {
+    use orbital_voxel::smithing::SmithingInput;
+    use serde_json::json;
+    let directory =
+        PathBuf::from(std::env::var("MINECRAFT_REPORTS").expect("set MINECRAFT_REPORTS"));
+    let jar =
+        PathBuf::from(std::env::var("MINECRAFT_CLIENT_JAR").expect("set MINECRAFT_CLIENT_JAR"));
+    let reports = RegistryReports::load_pinned(&directory).unwrap();
+    let items = ItemCatalog::load_pinned(&reports, &directory).unwrap();
+    let mut assets = ClientAssets::open(&jar).unwrap();
+    let tags = ItemTags::load(&mut assets, &items).unwrap();
+    let book = RecipeBook::load(&mut assets, &tags, &items).unwrap();
+    assert_eq!(book.smithing.len(), 12);
+    for (id, recipe) in &book.smithing {
+        let raw = &book.raw[id];
+        let mut base = items.stack(raw["base"].as_str().unwrap(), 1).unwrap();
+        base.patch
+            .insert("minecraft:custom_name".into(), Some(json!("Kept name")));
+        base.patch
+            .insert("minecraft:custom_data".into(), Some(json!({"test":123})));
+        base.patch.insert("minecraft:repair_cost".into(), None);
+        if base.component(&items, "minecraft:max_damage").is_some() {
+            base.patch
+                .insert("minecraft:damage".into(), Some(json!(123)));
+        }
+        let expected_patch = base.patch.clone();
+        if let Some(default) = base.component(&items, "minecraft:max_damage").cloned() {
+            base.patch
+                .insert("minecraft:max_damage".into(), Some(default));
+        }
+        let mut input = SmithingInput {
+            template: Some(items.stack(raw["template"].as_str().unwrap(), 2).unwrap()),
+            base: Some(base),
+            addition: Some(items.stack("netherite_ingot", 2).unwrap()),
+        };
+        let preview = recipe.preview(&input, &items).unwrap().unwrap();
+        assert_eq!(preview.item, raw["result"]["id"].as_str().unwrap());
+        assert_eq!(preview.patch, expected_patch);
+        assert_eq!(
+            preview.component(&items, "minecraft:max_damage"),
+            items
+                .get(&preview.item)
+                .unwrap()
+                .components
+                .get("minecraft:max_damage")
+        );
+        let mut inventory = Inventory::new(1).unwrap();
+        inventory
+            .set(0, Some(items.stack("bedrock", 64).unwrap()), &items)
+            .unwrap();
+        let before_input = input.clone();
+        let before_inventory = inventory.clone();
+        assert!(
+            !recipe
+                .craft_into(&mut input, &mut inventory, &items)
+                .unwrap(),
+            "{id}"
+        );
+        assert_eq!(input, before_input);
+        assert_eq!(inventory, before_inventory);
+        inventory.remove(0, 64).unwrap();
+        assert!(
+            recipe
+                .craft_into(&mut input, &mut inventory, &items)
+                .unwrap(),
+            "{id}"
+        );
+        assert_eq!(inventory.slots()[0], Some(preview));
+        assert!(input.base.is_none());
+        assert_eq!(input.template.as_ref().unwrap().count, 1);
+        assert_eq!(input.addition.as_ref().unwrap().count, 1);
+        let mut wrong = before_input;
+        wrong.addition = Some(items.stack("iron_ingot", 1).unwrap());
+        assert!(recipe.preview(&wrong, &items).unwrap().is_none());
+    }
+}

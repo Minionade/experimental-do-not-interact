@@ -208,3 +208,24 @@ Omit `--recipe` to list available outputs. The original-data test executes every
 stonecutting recipe and verifies source-defined output counts and blocked-output
 rollback. The ordinary suite also checks partial-stack capacity and component
 isolation between input and output.
+
+## Smithing transforms
+
+The 12 original netherite upgrade recipes now support matching, output previews,
+and atomic inventory transactions. Explicit base-item component changes survive
+upgrading; the output receives its new item's default components, and recipe
+component overrides take precedence. Redundant source defaults are discarded so
+an unchanged diamond tool's durability limit does not replace the netherite limit.
+Armor trims, smithing UI, unlocks and advancements remain unfinished.
+
+```sh
+cargo run --locked --no-default-features --bin vanilla-audit -- --minecraft-jar /path/to/26.3.jar --pinned-reports /path/to/generated/reports --smithing-input examples/smithing/netherite_pickaxe.json --recipe netherite_pickaxe_smithing
+```
+
+Omit `--recipe` to list matching transforms. The original recipe integration test
+also checks all 12 transformations, retained data, output defaults and rollback.
+`tools/SmithingProbe.java` provides a reproducible behavioral probe against the
+pinned server: compile it with the extracted server/library JARs on the classpath,
+then run it with the generated reports directory as its sole argument. It checks
+original Java smithing/component-transfer behavior; it is not needed by the Rust
+runtime. Use Java 25 and the hash-verified server used by `generate_reports.py`.

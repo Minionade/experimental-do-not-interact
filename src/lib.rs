@@ -31,3 +31,5 @@ pub mod collision;
 pub mod oracle;
 
 pub mod block_collision;
+
+pub mod smithing;

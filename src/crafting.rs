@@ -93,9 +93,13 @@ fn resolve_tag(
     Ok(values)
 }
 #[derive(Clone)]
-struct Ingredient(BTreeSet<String>);
+pub(crate) struct Ingredient(BTreeSet<String>);
 impl Ingredient {
-    fn parse(value: &Value, tags: &ItemTags, catalog: &ItemCatalog) -> Result<Self, String> {
+    pub(crate) fn parse(
+        value: &Value,
+        tags: &ItemTags,
+        catalog: &ItemCatalog,
+    ) -> Result<Self, String> {
         let mut values = BTreeSet::new();
         if let Some(array) = value.as_array() {
             if array.is_empty() {
@@ -126,7 +130,7 @@ impl Ingredient {
         }
         Ok(Self(values))
     }
-    fn accepts(&self, stack: &ItemStack) -> bool {
+    pub(crate) fn accepts(&self, stack: &ItemStack) -> bool {
         self.0.contains(&stack.item)
     }
 }
@@ -173,6 +177,7 @@ pub struct RecipeBook {
     pub crafting: BTreeMap<String, CraftingRecipe>,
     pub cooking: BTreeMap<String, CookingRecipe>,
     pub stonecutting: BTreeMap<String, StonecuttingRecipe>,
+    pub smithing: BTreeMap<String, crate::smithing::TransformRecipe>,
     pub unsupported: BTreeMap<String, String>,
     pub raw: BTreeMap<String, Value>,
 }
@@ -214,6 +219,7 @@ impl RecipeBook {
             crafting: BTreeMap::new(),
             cooking: BTreeMap::new(),
             stonecutting: BTreeMap::new(),
+            smithing: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         };
@@ -228,6 +234,13 @@ impl RecipeBook {
                     book.crafting.insert(
                         id.clone(),
                         CraftingRecipe::parse(&value, tags, catalog)
+                            .map_err(|e| format!("{id}: {e}"))?,
+                    );
+                }
+                "minecraft:smithing_transform" => {
+                    book.smithing.insert(
+                        id.clone(),
+                        crate::smithing::TransformRecipe::parse(&value, tags, catalog)
                             .map_err(|e| format!("{id}: {e}"))?,
                     );
                 }
@@ -393,7 +406,7 @@ impl RecipeBook {
         Ok(true)
     }
 }
-fn parse_result(value: &Value, catalog: &ItemCatalog) -> Result<ItemStack, String> {
+pub(crate) fn parse_result(value: &Value, catalog: &ItemCatalog) -> Result<ItemStack, String> {
     let name = value["id"].as_str().ok_or("result requires item ID")?;
     let count = value
         .get("count")
@@ -629,6 +642,7 @@ mod tests {
             crafting: [("minecraft:test".into(), r)].into(),
             cooking: BTreeMap::new(),
             stonecutting: BTreeMap::new(),
+            smithing: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         };
@@ -658,6 +672,7 @@ mod tests {
             crafting: BTreeMap::new(),
             cooking: BTreeMap::new(),
             stonecutting: [("minecraft:test".into(), recipe)].into(),
+            smithing: BTreeMap::new(),
             unsupported: BTreeMap::new(),
             raw: BTreeMap::new(),
         }

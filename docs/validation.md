@@ -159,3 +159,15 @@ and full-inventory rollback checks against original recipe JSON. Seventy core
 tests pass; warning-free Clippy covers all targets. This is backend execution,
 not stonecutter menu or progression parity. Specialized unsupported recipes are
 now 373, down from 724; cooking recipes remain parsed but not simulated.
+
+## Smithing transforms
+
+All 12 original smithing-transform recipes passed original-data integration tests
+for matching, component preservation, target prototype defaults, consumption and
+blocked-output rollback. The public Java runtime probe confirmed damage 321 and
+custom-name retention, explicit repair-cost removal, and recipe damage override
+7 when upgrading a diamond pickaxe to netherite. Source values equal to their
+prototype defaults are normalized away before transfer. The core suite contains
+73 passing tests; two original-recipe integration tests are opt-in. Specialized
+unsupported recipes now number 361. Smithing trims and menu/progression behavior
+are still unimplemented.
