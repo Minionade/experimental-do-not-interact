@@ -1,0 +1,30 @@
+{
+  "width": 3,
+  "height": 3,
+  "slots": [
+    {
+      "item": "minecraft:iron_ingot",
+      "count": 2
+    },
+    {
+      "item": "minecraft:iron_ingot",
+      "count": 2
+    },
+    {
+      "item": "minecraft:iron_ingot",
+      "count": 2
+    },
+    null,
+    {
+      "item": "minecraft:stick",
+      "count": 2
+    },
+    null,
+    null,
+    {
+      "item": "minecraft:stick",
+      "count": 2
+    },
+    null
+  ]
+}

@@ -1,0 +1,12 @@
+api = 1
+id = "minionade"
+
+[[blocks]]
+id = "minionade:hull"
+density = 30.0
+color = [0.59, 0.67, 0.72]
+
+[[blocks]]
+id = "minionade:thruster"
+density = 50.0
+color = [0.95, 0.52, 0.12]

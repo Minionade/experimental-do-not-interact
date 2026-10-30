@@ -1,0 +1,50 @@
+name: Rust checks and desktop builds
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - run: cargo test --locked --no-default-features
+      - run: cargo run --locked --release --no-default-features -- --headless --mesh-bench
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux development libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake libsdl2-dev libgl1-mesa-dev xvfb
+      - run: cargo build --locked --release --features bundled-sdl
+      - name: Render smoke test
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo run --locked --release --features bundled-sdl -- --frames 3 --screenshot smoke.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbital-voxel-${{ runner.os }}
+          path: |
+            target/release/orbital-voxel
+            target/release/orbital-voxel.exe
+            target/release/vanilla-audit
+            target/release/vanilla-audit.exe
+            target/release/vanilla-preview
+            target/release/vanilla-preview.exe
+            examples/mods/
+            README.md

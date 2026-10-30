@@ -1,0 +1,13 @@
+{
+  "template": { "item": "minecraft:netherite_upgrade_smithing_template", "count": 1 },
+  "base": {
+    "item": "minecraft:diamond_pickaxe",
+    "count": 1,
+    "patch": {
+      "minecraft:damage": 321,
+      "minecraft:custom_name": "Kept name",
+      "minecraft:repair_cost": null
+    }
+  },
+  "addition": { "item": "minecraft:netherite_ingot", "count": 1 }
+}

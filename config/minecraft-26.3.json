@@ -1,0 +1,27 @@
+{
+  "version": "26.3",
+  "metadata_url": "https://piston-meta.mojang.com/v1/packages/5df1795e16eea19d75b923d66ecca9ce183353c5/26.3.json",
+  "metadata_sha1": "5df1795e16eea19d75b923d66ecca9ce183353c5",
+  "client_sha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
+  "client_size": 41483720,
+  "asset_index_id": "34",
+  "asset_index_sha1": "917ff6d74b9f635c46bac0d28857206bbcc1ffe4",
+  "server_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
+  "java_major_version": 25,
+  "world_version": 5023,
+  "protocol_version": 777,
+  "resource_pack_version": [
+    97,
+    1
+  ],
+  "data_pack_version": [
+    121,
+    0
+  ],
+  "reports_sha1": {
+    "blocks.json": "91d30c3a9dd67ccaf498cb6d9d9abdb0fe0a8d38",
+    "registries.json": "8b707c5e9239d22f129f35973a83958234689b59"
+  },
+  "item_components_sha1": "85f23ad91c88e4b9064c96d17f0e289aa487adc9",
+  "physics_sha1": "251fa36044bc2b2c6b89a92b2657975e8416e828"
+}
